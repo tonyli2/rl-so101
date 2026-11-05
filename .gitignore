@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+MUJOCO_LOG.TXT
+# Download caches
+.cache/
+
+# Generated verification images
+lerobot-tabletop/verification/

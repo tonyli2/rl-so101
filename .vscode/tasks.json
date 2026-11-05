@@ -1,0 +1,25 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Verify LeRobot, CUDA and MuJoCo",
+      "type": "process",
+      "command": "/home/tonyli2/miniforge3/bin/conda",
+      "args": [
+        "run",
+        "--no-capture-output",
+        "-n",
+        "lerobot",
+        "python",
+        "${workspaceFolder}/archive/setup/verify_installation.py"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "MUJOCO_GL": "egl"
+        }
+      },
+      "problemMatcher": []
+    }
+  ]
+}

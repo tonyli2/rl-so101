@@ -1,0 +1,30 @@
+{
+  "folders": [
+    {
+      "name": "ENPH 576",
+      "path": "."
+    },
+    {
+      "name": "LeRobot",
+      "path": "../lebrobot"
+    }
+  ],
+  "settings": {
+    "python.defaultInterpreterPath": "/home/tonyli2/miniforge3/envs/lerobot/bin/python",
+    "python.condaPath": "/home/tonyli2/miniforge3/bin/conda",
+    "python.terminal.activateEnvironment": true,
+    "[python]": {
+      "editor.defaultFormatter": "charliermarsh.ruff"
+    }
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-python.python",
+      "ms-python.vscode-pylance",
+      "ms-python.debugpy",
+      "charliermarsh.ruff",
+      "ms-toolsai.jupyter",
+      "redhat.vscode-yaml"
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "python.defaultInterpreterPath": "/home/tonyli2/miniforge3/envs/lerobot/bin/python",
+  "python.condaPath": "/home/tonyli2/miniforge3/bin/conda",
+  "python.terminal.activateEnvironment": true,
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff"
+  }
+}
