@@ -48,6 +48,17 @@ def main():
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--fixed-layout",
+        action="store_true",
+        help="Disable cube/bin randomization (legacy baseline or tests)",
+    )
+    parser.add_argument(
+        "--layout-reference",
+        type=Path,
+        default=Path(__file__).parent / "recordings/sim-baseline",
+        help="Clean demonstration dataset providing approach/release IK seeds",
+    )
+    parser.add_argument(
         "--headless", action="store_true", help="Offscreen cameras, no MuJoCo window"
     )
     parser.add_argument(
@@ -116,6 +127,7 @@ def main():
     from lerobot.utils.keyboard_input import create_key_listener
     from mounts.environment import make_single_env
     from recording.schema import JOINTS
+    from recording.self_collision import SelfCollisionError
     from recording.session import RecordingSession, open_leader
 
     simulation = make_single_env(
@@ -125,6 +137,23 @@ def main():
         terminate_on_success=False,
         episode_length=args.steps + int(args.settle_seconds * args.fps) + 2,
     )
+    randomized = not args.fixed_layout and not args.synthetic
+    if args.resume:
+        import json
+
+        manifests = list((args.root / "sim_archive/episodes").glob("*.json"))
+        if any(
+            bool(
+                json.loads(p.read_text())
+                .get("metadata", {})
+                .get("layout_randomization")
+            )
+            != randomized
+            for p in manifests
+        ):
+            raise ValueError(
+                "Cannot mix fixed and randomized layouts; use a new root (or --fixed-layout for the old baseline)"
+            )
     session = leader = viewer = listener = preview = None
     commands = queue.SimpleQueue()
     saved = 0
@@ -145,7 +174,9 @@ def main():
                 session.world,
                 lock=viewer.lock() if viewer is not None else None,
                 status=(
-                    "REVIEW — k: keep / d: discard"
+                    f"REJECTED — {session.rejection_reason}; r: reset / s: retry"
+                    if session.rejection_reason
+                    else "REVIEW — k: keep / d: discard"
                     if session.review
                     else "RECORDING — f: finish"
                     if session.active
@@ -156,6 +187,12 @@ def main():
     def reset_preview():
         with viewer.lock() if viewer is not None else contextlib.nullcontext():
             session.reset()
+            if session.layout is not None:
+                layout = session.layout.current
+                print(
+                    f"New layout: cube {layout['cube_position']}; bin {layout['bin_position']}. Position the arm, then s=start.",
+                    flush=True,
+                )
 
     def tick(action, *, settling=False):
         timer.tick()
@@ -182,10 +219,24 @@ def main():
             if viewer is not None and not viewer.is_running():
                 break
             tick(last_action, settling=True)
+            if not session.active:
+                return
         session.finish()
         print(
             "Review: k=keep successful demo, d=discard/reset, q=quit. Simulation paused.",
             flush=True,
+        )
+
+    def layout_factory(world, start_episode):
+        from recording.layout import LayoutSampler
+
+        return LayoutSampler(
+            world,
+            args.layout_reference,
+            args.seed,
+            args.width,
+            args.height,
+            start_episode,
         )
 
     try:
@@ -198,6 +249,7 @@ def main():
             seed=args.seed,
             resume=args.resume,
             source="synthetic" if args.synthetic else "real_leader",
+            layout_factory=layout_factory if randomized else None,
         )
         if args.multi_view:
             from recording.preview import MultiViewPreview
@@ -272,10 +324,18 @@ def main():
             if command in ("q", "esc"):
                 break
             if command == "s" and not session.active and not session.review:
-                with viewer.lock() if viewer is not None else contextlib.nullcontext():
-                    session.begin()
-                timer.restart()
-                print("Recording. f=finish; d=discard.", flush=True)
+                try:
+                    with (
+                        viewer.lock()
+                        if viewer is not None
+                        else contextlib.nullcontext()
+                    ):
+                        session.begin()
+                except SelfCollisionError as error:
+                    print(f"Cannot record: {error}", flush=True)
+                else:
+                    timer.restart()
+                    print("Recording. f=finish; d=discard.", flush=True)
             elif command == "f" and session.active:
                 finish()
             elif command == "k" and session.review:

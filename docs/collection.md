@@ -1,5 +1,47 @@
 # Demonstration collection
 
+## Randomized cube/bin collection (default for real-leader recording)
+
+```bash
+conda activate lerobot
+cd ~/code/enph576/lerobot-tabletop
+python record_demonstrations.py --root recordings/sim-collision-free \
+  --leader-port /dev/ttyACM0 --calibration-file calibration/leader.json \
+  --episodes 50
+```
+
+New real-leader sessions randomize task positions on initial preview and each
+reset, save, or discard. The cube is sampled within +/-4 cm in world X/Y.
+The bin is sampled 0–4 cm away and +/-4 cm sideways relative to the original
+cube-to-bin direction. Positions remain fixed during the episode, except for
+normal cube physics. You choose the arm starting pose before pressing S.
+Rejection sampling excludes overlapping/nearby cube/bin layouts (1 cm clearance
+beyond conservative footprints), table-edge violations, and layouts without
+verified approach/release IK endpoints. Endpoint checks do not prove a feasible
+collision-free path. Rejection changes the accepted distribution from uniform.
+
+The overhead camera must see at least 16 segmented cube pixels with a 2-pixel
+frame margin. This is checked during sampling and again at S after the arm has
+moved; moving the arm out of the way can clear an occlusion. If preview motion
+pushes the cube more than 2 mm from its sampled XY position, reset before starting.
+Robot contact with cube/bin at S also blocks recording. The usual self-collision
+gate still checks every physics step throughout recording.
+
+The sampler reuses existing endpoint IK and demonstrated reference poses from
+episode 0 of `recordings/sim-baseline`; override with `--layout-reference PATH`.
+Camera parameters, action units, and control frequency are unchanged. Each saved
+episode includes layout parameters, positions, RNG state, and endpoint witnesses;
+its scene snapshot contains the moved fixed bin and its state archive contains
+the cube pose. `--seed` selects a reproducible sampler stream; resumed sessions
+incorporate their existing episode count, rather than restarting at layout zero.
+
+Use a separate dataset for randomized collection. Resume with the same command
+plus `--resume`. Mixing fixed and randomized episodes is refused by the CLI.
+For legacy fixed-layout collection, explicitly pass `--fixed-layout`, including
+when appending to `recordings/sim-baseline`. Synthetic tests remain fixed unless
+using the session API to explicitly supply a sampler.
+
+
 The collection format is independent of the later policy. It stores ordinary
 single-step observations/actions in a native LeRobot dataset, plus a numerical
 MuJoCo archive for replay and camera re-rendering. ACT chunks, BC normalization,
@@ -32,7 +74,7 @@ demonstrations at the intended dataset resolution.
 ## Collect with the real leader
 
 ```bash
-python record_demonstrations.py --root recordings/sim-baseline \
+python record_demonstrations.py --fixed-layout --root recordings/sim-baseline \
   --leader-port /dev/ttyACM0 --calibration-file calibration/leader.json \
   --episodes 3
 ```
@@ -80,7 +122,7 @@ the active unaccepted attempt and preserves already finalized episodes.
 To append more episodes, repeat the same command with `--resume`:
 
 ```bash
-python record_demonstrations.py --root recordings/sim-baseline --resume \
+python record_demonstrations.py --fixed-layout --root recordings/sim-baseline --resume \
   --leader-port /dev/ttyACM0 --calibration-file calibration/leader.json \
   --episodes 3
 ```
@@ -218,3 +260,18 @@ Recordings are ignored by Git. A code commit or GitHub push does **not** back up
 the dataset. Preserve the entire dataset directory, including `sim_archive/`,
 when making a separate data backup. Existing scene snapshots retain the model
 and source code used at collection time even if the working code changes.
+
+## Self-collision rejection
+
+Collection now checks MuJoCo contacts between nonadjacent robot bodies at every
+physics substep, including the initial pose and the final refreshed state. A
+colliding pose cannot start recording. If contact occurs while recording, the
+attempt is automatically discarded, its pending marker/buffer is cleared, and
+the preview reports REJECTED with the contacting body names. Move the leader
+clear or reset, then start another attempt. Expected gripper-cube and cube-table
+contacts are allowed. A successful placement alone cannot override this gate.
+
+After quarantine, 32 accepted episodes remained; 18 clean replacements have
+since restored the fixed-layout baseline to 50. See
+[dataset quarantine](dataset-quarantine.md). Reindexed episode numbers differ
+from historical videos. Do not resume collection into the quarantine folder.
