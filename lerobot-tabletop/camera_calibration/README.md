@@ -60,3 +60,31 @@ MuJoCo cameras have no lens distortion. Undistort the real images with the saved
 - **Board thickness:** if the board sits on a backing, pass its thickness as Z.
 
 Results are written to `results/` and raw views to `captures/` (both ignored by git).
+
+## Provisional lens values (no board)
+
+`provisional_intrinsics.json` holds an estimate of the overhead camera's lens made on
+2026-11-22 without a calibration target. Use it until a board calibration replaces it.
+
+- **Distortion** was measured from straight edges in the scene (a rail, a power strip and the
+  table edge) and is good to about 1 px.
+- **Focal length** was not measured directly. It comes from the vendor's 130 degree diagonal
+  figure and from an equidistant-lens assumption, which agree within 1%. Treat it as +/- 5%.
+- **Principal point** is assumed to be the image centre.
+- The **wrist camera** is the same model but has not been measured.
+
+Raw 640x480 frames cover about 87 x 65.5 degrees with strong barrel distortion. MuJoCo renders
+an ideal pinhole, so undistort real frames before comparing them with the sim:
+
+```python
+import json, cv2, numpy as np
+
+p = json.load(open("provisional_intrinsics.json"))
+K = np.array(p["modes"]["640x480"]["camera_matrix"])
+D = np.array(p["distortion_opencv"]["coefficients"])
+undistorted = cv2.undistort(
+    frame_640x480, K, D
+)  # matches a MuJoCo camera with fovy 59.6
+```
+
+After that step the matching sim `fovy` is 59.6 degrees at 640x480.

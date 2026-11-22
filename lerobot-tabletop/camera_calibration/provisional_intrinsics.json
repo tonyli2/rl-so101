@@ -1,0 +1,222 @@
+{
+  "status": "PROVISIONAL - estimated without a calibration target. Replace with calib.py results when a board calibration is done.",
+  "date": "2026-11-22",
+  "camera": {
+    "model": "Innomaker U20CAM-1080p-S1 (USB 0c45:6366, UVC 1.00)",
+    "module_size_mm": [
+      32,
+      32
+    ],
+    "lens": "fixed focus wide angle, sold as 130 deg (diagonal over the full 16:9 frame)",
+    "sensor": "not published by the vendor",
+    "formats": "MJPEG up to 1920x1080@30; YUY2 640x480@30",
+    "auto_exposure": true,
+    "auto_white_balance": true,
+    "focus_control": false
+  },
+  "measured_on": "overhead (bird's-eye) camera only; the wrist camera is the same model but has not been measured",
+  "method": {
+    "distortion": "plumb-line fit: four straight scene edges (rail top/bottom, power strip, table edge) traced at 1920x1080 and straightened with a one-parameter division model; residual 0.9 px rms (12 px before); leave-one-line-out stable",
+    "focal_length": "not directly measured. Two estimates agree: 948 px from the 130 deg diagonal spec, 939 px assuming an equidistant lens (1920x1080 scale). Adopted 944 px.",
+    "principal_point": "assumed at the image centre; the line fit puts the distortion centre within about 40 px of it (1920x1080 scale)"
+  },
+  "uncertainty": {
+    "focal_length_pct": 5,
+    "principal_point_px_at_640x480": 20,
+    "distortion_validated_to_radius_px_at_640x480": 355
+  },
+  "distortion_opencv": {
+    "model": "plumb_bob [k1, k2, p1, p2, k3]",
+    "coefficients": [
+      -0.3126,
+      0.1274,
+      0.0,
+      0.0,
+      -0.0255
+    ],
+    "note": "resolution independent; valid inside the 4:3 image area"
+  },
+  "division_model": {
+    "formula": "r_u = r_d / (1 + a * r_d^2), r = pixel radius from the image centre / 1000 at 1920x1080",
+    "a": -0.3777
+  },
+  "modes": {
+    "640x480": {
+      "camera_matrix": [
+        [
+          419.4,
+          0,
+          320.0
+        ],
+        [
+          0,
+          419.4,
+          240.0
+        ],
+        [
+          0,
+          0,
+          1
+        ]
+      ],
+      "raw_image_fov_deg": {
+        "horizontal": 87.0,
+        "vertical": 65.5,
+        "diagonal": 107.9
+      },
+      "undistorted_pinhole_fov_deg": {
+        "horizontal": 74.7,
+        "vertical_mujoco_fovy": 59.6
+      }
+    },
+    "1280x960": {
+      "camera_matrix": [
+        [
+          838.9,
+          0,
+          640.0
+        ],
+        [
+          0,
+          838.9,
+          480.0
+        ],
+        [
+          0,
+          0,
+          1
+        ]
+      ],
+      "raw_image_fov_deg": {
+        "horizontal": 87.0,
+        "vertical": 65.5,
+        "diagonal": 107.9
+      },
+      "undistorted_pinhole_fov_deg": {
+        "horizontal": 74.7,
+        "vertical_mujoco_fovy": 59.6
+      }
+    },
+    "800x600": {
+      "camera_matrix": [
+        [
+          524.3,
+          0,
+          400.0
+        ],
+        [
+          0,
+          524.3,
+          300.0
+        ],
+        [
+          0,
+          0,
+          1
+        ]
+      ],
+      "raw_image_fov_deg": {
+        "horizontal": 87.0,
+        "vertical": 65.5,
+        "diagonal": 107.9
+      },
+      "undistorted_pinhole_fov_deg": {
+        "horizontal": 74.7,
+        "vertical_mujoco_fovy": 59.6
+      }
+    },
+    "1920x1080": {
+      "camera_matrix": [
+        [
+          943.7,
+          0,
+          960.0
+        ],
+        [
+          0,
+          943.7,
+          540.0
+        ],
+        [
+          0,
+          0,
+          1
+        ]
+      ],
+      "raw_image_fov_deg": {
+        "horizontal": 114.7,
+        "vertical": 65.5,
+        "diagonal": 130.2
+      },
+      "undistorted_pinhole_fov_deg": {
+        "horizontal": 91.0,
+        "vertical_mujoco_fovy": 59.6
+      }
+    },
+    "1280x720": {
+      "camera_matrix": [
+        [
+          629.2,
+          0,
+          640.0
+        ],
+        [
+          0,
+          629.2,
+          360.0
+        ],
+        [
+          0,
+          0,
+          1
+        ]
+      ],
+      "raw_image_fov_deg": {
+        "horizontal": 114.7,
+        "vertical": 65.5,
+        "diagonal": 130.2
+      },
+      "undistorted_pinhole_fov_deg": {
+        "horizontal": 91.0,
+        "vertical_mujoco_fovy": 59.6
+      }
+    },
+    "640x360": {
+      "camera_matrix": [
+        [
+          314.6,
+          0,
+          320.0
+        ],
+        [
+          0,
+          314.6,
+          180.0
+        ],
+        [
+          0,
+          0,
+          1
+        ]
+      ],
+      "raw_image_fov_deg": {
+        "horizontal": 114.7,
+        "vertical": 65.5,
+        "diagonal": 130.2
+      },
+      "undistorted_pinhole_fov_deg": {
+        "horizontal": 91.0,
+        "vertical_mujoco_fovy": 59.6
+      }
+    }
+  },
+  "mode_geometry": "4:3 modes (640x480, 800x600, 1280x960) are the centre 75% of the 16:9 frame's width at full height; 640x480 = 1920x1080 cropped to 1440x1080 and scaled by 1/2.25",
+  "sim": {
+    "resolution": [
+      640,
+      480
+    ],
+    "fovy_deg": 59.6,
+    "note": "MuJoCo renders an ideal pinhole. This fovy matches real frames only after they are undistorted with the 640x480 camera_matrix and distortion_opencv (cv2.undistort, same camera matrix for output)."
+  }
+}
