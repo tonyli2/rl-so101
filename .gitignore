@@ -18,3 +18,8 @@ recordings/
 
 # Local policies, evaluation videos and training logs
 outputs/
+
+# Camera calibration captures and results
+lerobot-tabletop/camera_calibration/captures/
+lerobot-tabletop/camera_calibration/results/
+lerobot-tabletop/camera_calibration/board.png
