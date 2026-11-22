@@ -133,6 +133,7 @@ class _World:
         width: int,
         randomize: Mapping,
         camera_fovy: Mapping[str, float],
+        cube_bodies: Sequence[str] = CUBE_BODIES,
     ):
         self.model = build_model(scene, root)
         # The control period must be a whole number of physics steps.
@@ -141,7 +142,7 @@ class _World:
         self.data = mujoco.MjData(self.model)
         self.renderer = mujoco.Renderer(self.model, height, width)
         self.qadr = np.array([self.model.joint(name).qposadr[0] for name in JOINTS])
-        self.cube_bodies = [self._id(mujoco.mjtObj.mjOBJ_BODY, name, "the task") for name in CUBE_BODIES]
+        self.cube_bodies = [self._id(mujoco.mjtObj.mjOBJ_BODY, name, "the task") for name in cube_bodies]
         self.box_body = self._id(mujoco.mjtObj.mjOBJ_BODY, BOX_BODY, "the task")
         self.actuators = np.array([self.model.actuator(name).id for name in JOINTS])
         self.lo, self.hi = self.model.actuator_ctrlrange[self.actuators].T.copy()
@@ -294,6 +295,7 @@ class SO101Env(gym.Env):
         initial_joints: Sequence[float] = HOME,
         randomize: Mapping[str, Any] | None = None,
         camera_fovy: Mapping[str, float] | None = None,
+        terminate_on_success: bool = True,
     ):
         super().__init__()
         # None: the repository's tabletop scene, located on first use.
@@ -302,6 +304,7 @@ class SO101Env(gym.Env):
         self.fps = fps
         self._max_episode_steps = episode_length
         self._steps = 0
+        self.terminate_on_success = terminate_on_success
         self.height = observation_height
         self.width = observation_width
         # Observation key -> MJCF camera name.
@@ -371,14 +374,19 @@ class SO101Env(gym.Env):
         action = np.asarray(action)
         if action.shape != self.action_space.shape:
             raise ValueError(f"Expected action of shape {self.action_space.shape}, got {action.shape}")
+        if not np.isfinite(action).all():
+            raise ValueError("Action must contain only finite values")
         world.data.ctrl[world.actuators] = world.to_ctrl(action)
         mujoco.mj_step(world.model, world.data, nstep=world.substeps)
+        # mj_step advances qpos/qvel, but derived body/camera transforms can
+        # still describe the preceding substep. Observations must be aligned.
+        mujoco.mj_forward(world.model, world.data)
         self._steps += 1
         in_box = world.cubes_in_box()
-        success = in_box == len(CUBE_BODIES)
+        success = in_box == len(world.cube_bodies)
         truncated = self._steps >= self._max_episode_steps
         info = {"is_success": success, "cubes_in_box": in_box}
-        return self._obs(world), in_box / len(CUBE_BODIES), success, truncated, info
+        return self._obs(world), in_box / len(world.cube_bodies), success and self.terminate_on_success, truncated, info
 
     def close(self) -> None:
         if self._world is not None:

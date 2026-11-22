@@ -1,9 +1,13 @@
 import importlib
 import json
+import os
 import subprocess
 import tempfile
 from importlib import metadata
 from pathlib import Path
+
+# This script renders offscreen, independently of the caller's shell settings.
+os.environ["MUJOCO_GL"] = "egl"
 
 import torch
 

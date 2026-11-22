@@ -1,4 +1,6 @@
-mujoco==3.3.7
+# Match the compiled scene archives collected in recordings/sim-baseline.
+mujoco==3.17.0
 gymnasium>=1.0
 numpy
 huggingface_hub
+Pillow

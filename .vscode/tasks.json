@@ -14,10 +14,7 @@
         "${workspaceFolder}/archive/setup/verify_installation.py"
       ],
       "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "MUJOCO_GL": "egl"
-        }
+        "cwd": "${workspaceFolder}"
       },
       "problemMatcher": []
     }

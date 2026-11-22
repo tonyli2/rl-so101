@@ -6,3 +6,12 @@ MUJOCO_LOG.TXT
 
 # Generated verification images
 lerobot-tabletop/verification/
+lerobot-tabletop/mounts/generated/
+
+# Local demonstrations and simulator archives
+datasets/
+recordings/
+
+# Local test and formatter caches
+.pytest_cache/
+.ruff_cache/

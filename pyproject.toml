@@ -1,0 +1,12 @@
+[tool.ruff]
+target-version = "py312"
+extend-exclude = [
+    "archive",  # Historical installation snapshots.
+    "lerobot-tabletop/env.py",  # Keep changes to the upstream environment focused.
+    "lerobot-tabletop/robotstudio_so101",
+    "lerobot-tabletop/mounts/generated",
+    "lerobot-tabletop/recordings",
+]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

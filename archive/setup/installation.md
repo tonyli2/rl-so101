@@ -18,12 +18,12 @@ https://huggingface.co/docs/lerobot/main/en/installation
 source ~/miniforge3/etc/profile.d/conda.sh
 conda activate lerobot
 cd ~/code/enph576
-MUJOCO_GL=egl python archive/setup/verify_installation.py
+python archive/setup/verify_installation.py
 ```
 
-`MUJOCO_GL=egl` selects offscreen rendering for the verification script. Leave it
-unset when using MuJoCo's interactive desktop viewer unless the application
-specifically needs EGL.
+The verification script selects offscreen rendering automatically. The tabletop
+launcher selects desktop rendering normally and offscreen rendering for `--check`.
+No shell graphics configuration is needed for these scripts.
 
 ## Verified
 
@@ -63,4 +63,4 @@ MuJoCo joint coordinates use radians. Validate joint signs, zero offsets,
 limits, and gripper units before live control. Keep the existing calibration.
 
 Project goals, camera mounts, and later demonstration plans are in
-`../../sim_setup.md`. Camera intrinsics and exact modules remain unconfirmed.
+[project context](../../docs/project.md). Camera intrinsics and exact modules remain unconfirmed.

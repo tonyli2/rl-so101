@@ -1,0 +1,161 @@
+{
+  "_notes": [
+    "Geometry assembly from stock mesh mating features; nominal camera and base poses require visual confirmation.",
+    "World +X is forward into workspace, +Z up. Front observer at +X looking -X: left is -Y.",
+    "No lens calibration yet: keep 640x480,30Hz, old vertical FOV60/61; mount mesh visual only.",
+    "Follower origin offset accounts for base visual footprint centre x=.021135 and bottom z=-.0024.",
+    "Corrected left adapter registration: Rx90 matches robot footprint; tab-root Z=-122.95004 mates stand Z=83.02499, insertion 10mm. Stand moved alongside fixed follower."
+  ],
+  "task": {
+    "cube_position": [0.23, 0.0, 0.015],
+    "box_position": [0.22, 0.125, 0.0]
+  },
+  "stand_position": [
+    -0.0326695,
+    0.11603212,
+    0
+  ],
+  "overhead_parts": [
+    {
+      "name": "overhead_bottom",
+      "file": "cam_mount_bottom.stl",
+      "pos": [
+        -0.0187,
+        0.0365125,
+        0
+      ],
+      "quat": [
+        0.7071067812,
+        0.7071067812,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "overhead_middle",
+      "file": "cam_mount_middle.stl",
+      "pos": [
+        0,
+        0,
+        0.1881
+      ],
+      "quat": [
+        0.7071067812,
+        0.7071067812,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "overhead_top",
+      "file": "cam_mount_top.stl",
+      "pos": [
+        0,
+        0,
+        0.1881
+      ],
+      "quat": [
+        0.7071067812,
+        0.7071067812,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "left_arm_base",
+      "file": "arm_base.stl",
+      "pos": [
+        0.07522091369628905,
+        -0.1694625866203308,
+        0.005
+      ],
+      "quat": [
+        0.7071067811865476,
+        0.7071067811865475,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "right_arm_base",
+      "file": "arm_base.stl",
+      "pos": [
+        0.07522091369628905,
+        0.06260165522384644,
+        0.005
+      ],
+      "quat": [
+        0.7071067811865476,
+        0.7071067811865475,
+        0,
+        0
+      ]
+    }
+  ],
+  "follower_position": [
+    -0.0277045,
+    0.0,
+    0.0096
+  ],
+  "follower_quaternion": [
+    1,
+    0,
+    0,
+    0
+  ],
+  "overhead_camera": {
+    "pos": [
+      0.033120690273436046,
+      0.0,
+      0.5438884736915043
+    ],
+    "xyaxes": [
+      0.0,
+      -1.0,
+      0.0,
+      0.9111526308495718,
+      0.0,
+      0.4120690273436043
+    ],
+    "fovy": 60,
+    "pcb_pos": [
+      0.029,
+      0.0,
+      0.553
+    ],
+    "pcb_quat": [
+      0.691222220210254,
+      0.14903637907439604,
+      -0.14903637907439604,
+      -0.691222220210254
+    ],
+    "lens_pos": [
+      0.031060345136718022,
+      0.0,
+      0.5484442368457522
+    ]
+  },
+  "wrist": {
+    "mesh_pos": [
+      -0.01495,
+      0.024000214,
+      -0.031549869
+    ],
+    "mesh_quat": [
+      -0.5,
+      0.5,
+      -0.5,
+      0.5
+    ],
+    "plate_center": [
+      -0.047976,
+      -0.038755,
+      0.0175
+    ],
+    "camera_roll_degrees": 0,
+    "fovy": 61,
+    "mount_mass": 0.012,
+    "camera_mass": 0.005,
+    "camera_plate_side": -1.0
+  }
+}

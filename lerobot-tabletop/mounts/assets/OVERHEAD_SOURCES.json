@@ -1,0 +1,27 @@
+{
+  "source_repo": "https://github.com/TheRobotStudio/SO-ARM100",
+  "source_commit": "141aea7bcac2744d92998e30268c413202a56f96",
+  "license": "Apache-2.0",
+  "assets": {
+    "arm_base.stl": {
+      "upstream_path": "Optional/Overhead_Cam_Mount_32x32_UVC_Module/stl/arm_base.stl",
+      "sha256": "169adfd40bcca689334efd1188c9b42cc03c914dc0afeaa98cb5431013610833"
+    },
+    "SO-ARM101_camera_wrist_mount.stl": {
+      "upstream_path": "Optional/SO101_Wrist_Cam_Hex-Nut_Mount_32x32_UVC_Module/stl/SO-ARM101_camera_wrist_mount.stl",
+      "sha256": "e17a626158951ac8cdf8d960962c1a3c8bf23b64635a02f88b62016fe895cef8"
+    },
+    "cam_mount_top.stl": {
+      "upstream_path": "Optional/Overhead_Cam_Mount_32x32_UVC_Module/stl/cam_mount_top.stl",
+      "sha256": "206762be157918967741eb53665cac796485c4609ac64d4c9444d85c7fcb2c4c"
+    },
+    "cam_mount_middle.stl": {
+      "upstream_path": "Optional/Overhead_Cam_Mount_32x32_UVC_Module/stl/cam_mount_middle.stl",
+      "sha256": "f6f3980df74777f74cf53a4697cbb63e4e000ab53f418de209559214f733f84b"
+    },
+    "cam_mount_bottom.stl": {
+      "upstream_path": "Optional/Overhead_Cam_Mount_32x32_UVC_Module/stl/cam_mount_bottom.stl",
+      "sha256": "b3545b6cae437210e17b7dcfee2e12e00dc7a59ece9264f4b13ab9fd8ceb8088"
+    }
+  }
+}
