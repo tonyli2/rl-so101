@@ -15,3 +15,6 @@ recordings/
 # Local test and formatter caches
 .pytest_cache/
 .ruff_cache/
+
+# so101_rl training runs, checkpoints, check reports
+so101_rl/outputs/
