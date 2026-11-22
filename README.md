@@ -2,7 +2,8 @@
 
 Control a simulated SO-101 follower with a calibrated real leader, then collect
 pick-and-place demonstrations for imitation learning. The mounted task uses one
-red cube, a black bin, and overhead/wrist cameras. Policy training is next.
+red cube, a black bin, and overhead/wrist cameras. Train ACT locally and evaluate
+saved policies in the same mounted scene.
 
 ## Run
 
@@ -24,6 +25,9 @@ wrist images are recorded. Do not run two programs against the same leader port.
 
 ## Guides
 
+- [Local ACT training, evaluation and Trackio](docs/training.md)
+- [Collision-aware collection and robustness evaluation](docs/robustness-evaluation.md)
+- [Dataset quarantine and original episode mappings](docs/dataset-quarantine.md)
 - [Collection, dataset format, validation and replay](docs/collection.md)
 - [Mounted scene, configuration, camera assumptions and asset sources](docs/simulation.md)
 - [Project goals, hardware and remaining sim-to-real work](docs/project.md)
@@ -42,7 +46,10 @@ wrist images are recorded. Do not run two programs against the same leader port.
 | `docs/` | Current project guides |
 | `archive/setup/` | Historical installation records |
 
-The local baseline contains 50 episodes / 26,006 frames. Recordings, generated
+The active local baseline contains 50 clean demonstrations: 32 retained after
+collision quarantine plus 18 newly collected replacements. The 18 original
+self-colliding episodes remain quarantined separately, and the original 50 are
+preserved in a historical backup. See the quarantine guide for mappings. Recordings, generated
 MJCF, caches and verification images stay outside Git. **Committing this code
 does not back up demonstrations**; preserve the full dataset directory separately.
 
