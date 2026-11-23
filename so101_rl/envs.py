@@ -34,6 +34,8 @@ import mujoco
 import numpy as np
 from gymnasium import spaces
 
+import randomization
+
 HERE = Path(__file__).absolute().parent
 TABLETOP = HERE.parent / "lerobot-tabletop"
 SCENE = HERE / "scene_pick_place.xml"
@@ -103,6 +105,7 @@ def build_model(variant: str = "mounted") -> mujoco.MjModel:
             if not name.startswith("_"):
                 setattr(spec.option, name, getattr(arm.option, name))
     spec.attach(arm, site=MOUNT_SITE, prefix="")
+    randomization.add_textures(spec)  # unused unless an env randomizes textures; rendering is unchanged
     if spec.body(TARGET) is None:
         target = spec.worldbody.add_body(name=TARGET, mocap=True, pos=[0.25, 0, 0.1])
         target.add_geom(
@@ -510,6 +513,11 @@ class So101ReachEnv(_So101TaskEnv):
 class So101PickPlaceEnv(_So101TaskEnv):
     """Stage 2: pick the red cube and leave it in the green box for ``settle_steps`` steps."""
 
+    # Potential-based shaping (Ng et al. 1999): reward = gamma * phi(s') - phi(s) + success bonus.
+    # Each stage of progress pays once when reached (and is taken back if lost, e.g. a dropped
+    # cube), so stalling earns nothing and the optimal policy is unchanged by the shaping.
+    PHI_LIFT, PHI_CARRY, PHI_IN_BOX, SUCCESS_BONUS = 1.0, 2.0, 3.0, 10.0
+
     def __init__(
         self,
         episode_steps: int = 900,  # demonstrations average 513 steps; Tony's evaluation deadline is 900
@@ -517,15 +525,70 @@ class So101PickPlaceEnv(_So101TaskEnv):
         cube_yaw_range: float = 0.0,
         settle_steps: int = 15,
         image: bool = True,
+        shaping_gamma: float = 0.99,
+        start_joints=None,
+        start_jitter_deg: float = 0.0,
+        randomize: dict | None = None,
+        fixed_factors: dict | None = None,
         **kwargs,
     ):
+        # Domain randomization (randomization.py), applied at every reset:
+        #   randomize={"factors": [...], "ranges": {...Ranges fields...}} samples a new setting;
+        #   fixed_factors={...} applies one fixed setting (evaluation sweeps). Default: nominal.
+        self.randomize = randomize
+        self.fixed_factors = fixed_factors
+        self._randomizer = None
+        self.last_factors: dict = {}
         self.cube_xy_range = np.asarray(cube_xy_range)
         self.cube_yaw_range = cube_yaw_range
         self.settle_steps = settle_steps
+        self.shaping_gamma = shaping_gamma
+        # Reset distribution for RL: random rows of start_joints (actuator radians, e.g. the
+        # demonstrations' first poses) with +-start_jitter_deg on the arm joints. reset(options=
+        # {"joints": q}) still overrides it.
+        self.start_joints = None if start_joints is None else np.asarray(start_joints, dtype=np.float64)
+        self.start_jitter = np.deg2rad(start_jitter_deg)
         self._in_box_steps = 0
+        self._phi = 0.0
         super().__init__(episode_steps=episode_steps, image=image, **kwargs)
 
+    def reset(self, seed: int | None = None, options: dict | None = None):
+        if self.start_joints is not None and not (options and options.get("joints") is not None):
+            gym.Env.reset(self, seed=seed)  # seed np_random before sampling the start
+            q = self.start_joints[self.np_random.integers(len(self.start_joints))].copy()
+            q[ARM] += self.np_random.uniform(-self.start_jitter, self.start_jitter, 5)
+            options = {**(options or {}), "joints": q}
+            seed = None  # already seeded
+        return super().reset(seed=seed, options=options)
+
+    def _potential(self) -> tuple[float, dict]:
+        w = self.world
+        ee, cube = w.ee_pos(), w.cube_pos()
+        box = w.data.xpos[w.box_body].copy()
+        d_reach = float(np.linalg.norm(ee - cube))
+        lifted = bool(cube[2] > CUBE_HALF + 0.02)
+        d_box = float(np.linalg.norm((box + (0, 0, 0.08)) - cube))
+        in_box = w.cube_in_box()
+        phi = (1 - np.tanh(10 * d_reach)) if not lifted else 1.0
+        phi += lifted * (self.PHI_LIFT + self.PHI_CARRY * (1 - np.tanh(5 * d_box)))
+        phi += self.PHI_IN_BOX * in_box
+        return float(phi), {"d_reach": d_reach, "lifted": lifted, "in_box": in_box}
+
+    def _apply_randomization(self) -> None:
+        if self.randomize is None and self.fixed_factors is None:
+            return
+        if self._randomizer is None:
+            self._randomizer = randomization.Randomizer(self.world, camera=self.camera)
+        if self.fixed_factors is not None:
+            self.last_factors = self.fixed_factors
+        else:
+            ranges = randomization.Ranges(**self.randomize.get("ranges", {}))
+            factors = self.randomize.get("factors", ("texture", "lighting", "camera", "friction"))
+            self.last_factors = self._randomizer.sample(self.np_random, ranges, factors)
+        self._randomizer.apply(self.last_factors)
+
     def _reset_task(self) -> None:
+        self._apply_randomization()
         w = self.world
         a = w.cube_qadr
         xy = w.cube_start[:2] + self.np_random.uniform(-self.cube_xy_range, self.cube_xy_range)
@@ -534,36 +597,40 @@ class So101PickPlaceEnv(_So101TaskEnv):
         w.data.qpos[a + 3 : a + 7] = (np.cos(yaw / 2), 0, 0, np.sin(yaw / 2))
         w.set_target((0.45, 0.30, -0.2))  # hide the reach marker under the table
         self._in_box_steps = 0
+        mujoco.mj_forward(w.model, w.data)
+        self._phi, _ = self._potential()
 
     def _task_state(self) -> np.ndarray:
         # Gripper state: commanded and measured opening, normalized (also inside qpos/targets).
         return np.zeros(0)
 
     def _reward(self, action):
-        w = self.world
-        ee, cube = w.ee_pos(), w.cube_pos()
-        box = w.data.xpos[w.box_body].copy()
-        d_reach = float(np.linalg.norm(ee - cube))
-        lifted = cube[2] > CUBE_HALF + 0.02
-        d_box = float(np.linalg.norm((box + (0, 0, 0.08)) - cube))
-        in_box = w.cube_in_box()
+        phi, s = self._potential()
+        d_reach, lifted, in_box = s["d_reach"], s["lifted"], s["in_box"]
         # Released: cube in box and not between the fingers.
         released = in_box and d_reach > 0.03
         self._in_box_steps = self._in_box_steps + 1 if released else 0
         success = self._in_box_steps >= self.settle_steps
-        reward = (1 - np.tanh(10 * d_reach))
-        reward += 1.0 * lifted
-        reward += 2.0 * (1 - np.tanh(5 * d_box)) * lifted
-        reward += 5.0 * in_box
-        reward += 10.0 * success
-        reward -= 0.01 * float(np.square(action[ARM]).sum())
+        reward = self.shaping_gamma * phi - self._phi + self.SUCCESS_BONUS * success
+        reward -= 0.001 * float(np.square(action[ARM]).sum())
+        self._phi = phi
         info = {
             "is_success": success,
             "cube_lifted": bool(lifted),
             "cube_in_box": in_box,
             "reach_distance": d_reach,
+            "grasp_depth_cm": self.grasp_depth_cm() if lifted else float("nan"),
         }
         return float(reward), success, info
+
+    def grasp_depth_cm(self) -> float:
+        """Cube centre along the fingers, from the gripper site (cm): + toward the fingertips.
+
+        Demonstrated carries hold it at +0.15 cm (median); BC grasps at +1.2-1.4 cm slip out.
+        """
+        w = self.world
+        rot = w.data.site_xmat[w.ee_site].reshape(3, 3)
+        return float(100 * (rot.T @ (w.cube_pos() - w.ee_pos())) @ w._pointing)
 
 
 gym.register("So101Reach-v0", entry_point=So101ReachEnv)

@@ -265,6 +265,7 @@ def rollout_parallel(model: PPO, starts: list[np.ndarray], n_envs: int = 8, epis
             obs = venv.reset()
             done = np.zeros(n_envs, bool)
             lifted, in_box = np.zeros(n_envs, bool), np.zeros(n_envs, bool)
+            depths = [[] for _ in range(n_envs)]  # cube position along the fingers while lifted
             outcome = [None] * n_envs
             steps = 0
             while not done.all() and steps < episode_steps:
@@ -276,10 +277,14 @@ def rollout_parallel(model: PPO, starts: list[np.ndarray], n_envs: int = 8, epis
                         continue  # this env auto-reset into another episode: ignore it
                     lifted[i] |= info["cube_lifted"]
                     in_box[i] |= info["cube_in_box"]
+                    if np.isfinite(info.get("grasp_depth_cm", np.nan)):
+                        depths[i].append(info["grasp_depth_cm"])
                     if dones[i]:
                         done[i] = True
                         outcome[i] = {"success": bool(info["is_success"]), "lifted": bool(lifted[i]),
-                                      "in_box": bool(in_box[i]), "steps": steps}
+                                      "in_box": bool(in_box[i]), "steps": steps,
+                                      "grasp_depth_cm": float(np.median(depths[i])) if depths[i] else None,
+                                      "lifted_steps": len(depths[i])}
             results.extend(outcome[: len(chunk)])
     finally:
         venv.close()
@@ -317,6 +322,15 @@ def full_eval(model: PPO, demos: Demos, run: Path | None, seed: int) -> dict:
                for m in ("success_rate", "lifted_rate", "in_box_rate")}
     print(f"{'ALL':18s} success {overall['success_rate']:5.1%}  lifted {overall['lifted_rate']:5.1%}  "
           f"in box {overall['in_box_rate']:5.1%}  ({total} episodes)")
+    episodes = [e for r in result.values() for e in r["per_episode"] if e.get("grasp_depth_cm") is not None]
+    for label, group in (("successful", [e for e in episodes if e["success"]]),
+                         ("failed", [e for e in episodes if not e["success"]])):
+        if group:
+            depth = np.median([e["grasp_depth_cm"] for e in group])
+            held = np.median([e["lifted_steps"] for e in group]) / 30
+            overall[f"grasp_depth_cm_{label}"] = float(depth)
+            print(f"grasp depth, {label:10s} carries: median {depth:+.2f} cm along the fingers "
+                  f"(demos: +0.15), held {held:.1f} s  ({len(group)} episodes)")
     result["all"] = {"episodes": total, **overall}
     return result
 

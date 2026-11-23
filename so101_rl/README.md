@@ -67,6 +67,34 @@ Lessons:
 - Remaining failure: the gripper closes ~1 cm too shallow on the cube, which slips out while
   being carried.
 
+## PPO fine-tuning (proposal: BC checkpoint -> nominal vs randomized PPO)
+
+```powershell
+python train_ppo.py --bc outputs\bc\resnet18_h1_dart_rel_e20_seed0_last\bc_model.zip --run-name nominal_s1 --seed 1 --steps 500000
+python train_ppo.py --bc ...\bc_model.zip --run-name randomized_s1 --seed 1 --steps 500000 --randomize
+python train_bc.py --eval outputs\ppo\<run>\model_300000.zip   # (copy bc_config.json next to it) 115-episode eval
+tensorboard --logdir outputs\ppo\tb
+```
+
+- Starts from a BC checkpoint (same network); episodes start from the demonstrations' start poses.
+- Critic warm-up (actor frozen) for 50k steps, then small learning rate, clip 0.1, `target_kl` 0.02.
+  Encoder heads stay at BC unless `--train-encoder`; the ResNet backbones are always frozen.
+- Reward: potential-based progress (reach, lift, carry toward the box, cube in the box) plus a
+  success bonus; stalling earns nothing.
+- 40-episode deterministic evaluation before training and every `--eval-every` steps; each
+  evaluated checkpoint is saved (`model_<step>.zip`, `eval_history.json`).
+- `--randomize [texture lighting camera friction]`: resample those factors every training episode
+  (`randomization.py`; 6 training textures, 3 held out for evaluation). Evaluation sweeps use the
+  env's `fixed_factors`.
+
+Nominal pilot (from the 20-epoch BC model, 1M steps, 1.7 h): 12.5% -> 100% success on the
+40-episode evaluation by 300k steps, then ~85-92%. The 300k checkpoint scores **96.5%** on the
+115-episode evaluation (BC: 12.2%); successful grasps hold the cube at -0.35 cm along the fingers
+(BC's slipping grasps: +1.2-1.4 cm) and finish in 4.5 s (demonstrations: ~17 s).
+
+`run_main_experiment.py` runs the six main runs (nominal / randomized x seeds 1-3) back to back
+from `outputs/ppo/main_plan.json`, which it re-reads before each run.
+
 ## Run
 
 ```powershell
