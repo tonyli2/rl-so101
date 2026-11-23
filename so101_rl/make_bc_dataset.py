@@ -36,6 +36,7 @@ from envs import So101PickPlaceEnv, prepare_mounted
 HERE = Path(__file__).parent
 DATASET = HERE.parent / "lerobot-tabletop" / "recordings" / "sim-baseline"
 OUT = HERE / "outputs" / "bc_data" / "sim-baseline.npz"
+PERTURBED = HERE / "outputs" / "bc_data" / "sim-baseline-perturbed.npz"
 STATE_MASK = mujoco.mjtState.mjSTATE_INTEGRATION
 TRAIN_EPISODES = range(0, 45)  # Tony's recommended split (release notes / dataset manifest)
 VAL_EPISODES = range(45, 50)
@@ -81,6 +82,41 @@ class ArchiveReplayer:
         self.world.set_target((0.45, 0.30, -0.2))  # the env hides the reach marker in this task
         mujoco.mj_forward(self.world.model, w)
         self.env._target_ctrl = self.world.ctrl  # the commanded targets are part of the observation
+
+    def cube_touches_fingers(self) -> bool:
+        w = self.world
+        fingers = set(w.finger_geoms.tolist())
+        for c in w.data.contact[: w.data.ncon]:
+            pair = {int(c.geom1), int(c.geom2)}
+            if w.cube_geom in pair and pair & fingers:
+                return True
+        return False
+
+    def perturb_arm(self, delta: np.ndarray) -> bool:
+        """Offset the five arm joints by ``delta`` (radians) in the loaded state, for rendering only.
+
+        A cube touching the fingers is carried rigidly with the gripper, so a held cube stays in the
+        hand. Returns whether the cube was carried.
+        """
+        w = self.world
+        m, d = w.model, w.data
+        carried = self.cube_touches_fingers()
+        if carried:
+            g = m.body("gripper").id
+            rot = d.xmat[g].reshape(3, 3).copy()
+            p_rel = rot.T @ (d.xpos[w.cube_body] - d.xpos[g])
+            q_inv, q_rel = np.zeros(4), np.zeros(4)
+            mujoco.mju_negQuat(q_inv, d.xquat[g])
+            mujoco.mju_mulQuat(q_rel, q_inv, d.xquat[w.cube_body])
+        q = d.qpos[w.qadr[:5]] + delta
+        d.qpos[w.qadr[:5]] = np.clip(q, w.lo[:5], w.hi[:5])
+        mujoco.mj_kinematics(m, d)
+        if carried:
+            a = w.cube_qadr
+            d.qpos[a : a + 3] = d.xmat[g].reshape(3, 3) @ p_rel + d.xpos[g]
+            mujoco.mju_mulQuat(d.qpos[a + 3 : a + 7], d.xquat[g], q_rel)
+        mujoco.mj_forward(m, d)
+        return carried
 
 
 def episodes() -> list[dict]:
@@ -132,10 +168,62 @@ def check_replay(replayer: ArchiveReplayer, items: list[dict], count: int) -> li
     return results
 
 
+def make_perturbed(replayer: ArchiveReplayer, items: list[dict], args) -> None:
+    """Noise augmentation (DART-style): nudged arm poses labelled with the demonstrated targets.
+
+    Actions are absolute joint targets on the demonstrated path, so from a nudged pose the original
+    label means "steer back onto the path": the recovery behavior plain BC never sees.
+    Training episodes only; validation stays clean.
+    """
+    env, rng = replayer.env, np.random.default_rng(args.seed)
+    sigma = np.deg2rad(args.perturb_deg)
+    states, images, wrist_images, actions, episode, frame, offsets = [], [], [], [], [], [], []
+    carried_count, start = 0, time.time()
+    for item in items:
+        if item["index"] not in TRAIN_EPISODES:
+            continue
+        arrays = np.load(item["npz"])
+        ep_states, controls = arrays["states"], arrays["controls"]
+        for t in range(len(controls)):
+            label = to_action(env.world, controls[t])
+            for _ in range(args.perturb):
+                replayer.load(item["scene"], ep_states[t])
+                delta = rng.normal(0.0, sigma, 5)
+                carried_count += replayer.perturb_arm(delta)
+                obs = env._observe(fresh=True)
+                states.append(obs["state"])
+                images.append(obs["front"])
+                wrist_images.append(obs["wrist"])
+                actions.append(label)
+                episode.append(item["index"])
+                frame.append(t)
+                offsets.append(delta)
+        print(f"episode {item['index']:2d}: {len(controls) * args.perturb} perturbed frames", flush=True)
+    PERTURBED.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        PERTURBED,
+        states=np.asarray(states, np.float32), images=np.asarray(images, np.uint8),
+        wrist_images=np.asarray(wrist_images, np.uint8), actions=np.asarray(actions, np.float32),
+        episode=np.asarray(episode, np.int16), frame=np.asarray(frame, np.int32),
+        offsets=np.asarray(offsets, np.float32),
+    )
+    info = {"copies_per_frame": args.perturb, "perturb_deg_std": args.perturb_deg, "seed": args.seed,
+            "frames": len(actions), "frames_with_cube_carried": int(carried_count),
+            "episodes": sorted(set(episode)), "seconds": round(time.time() - start, 1)}
+    PERTURBED.with_suffix(".json").write_text(json.dumps(info, indent=2))
+    print(f"\n{len(actions)} perturbed frames ({carried_count} with the cube carried) -> {PERTURBED} "
+          f"({info['seconds']} s)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--image-size", type=int, nargs=2, default=(96, 128), metavar=("H", "W"))
     parser.add_argument("--check-replay", type=int, default=3, help="episodes to re-simulate (0 to skip)")
+    parser.add_argument("--perturb", type=int, default=0, metavar="K",
+                        help="noise augmentation: write K perturbed copies of every training frame to "
+                             f"{PERTURBED.name} instead of the clean dataset")
+    parser.add_argument("--perturb-deg", type=float, default=2.5, help="std of the arm-joint offsets (degrees)")
+    parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     if not DATASET.is_dir():
         sys.exit(f"Dataset not found at {DATASET}; download and extract the sim-baseline-clean-50-v1 release")
@@ -145,6 +233,11 @@ def main() -> None:
                             wrist=True)
     replayer = ArchiveReplayer(env)
     items = episodes()
+
+    if args.perturb:
+        make_perturbed(replayer, items, args)
+        env.close()
+        return
 
     replay = check_replay(replayer, items, args.check_replay) if args.check_replay else []
 

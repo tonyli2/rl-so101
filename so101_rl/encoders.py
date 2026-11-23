@@ -7,6 +7,11 @@ keeps its spatial layout (where the cube is matters), is reduced by a 1x1 conv a
 
 With ``freeze=True`` (default) the ResNets keep their ImageNet weights and BatchNorm statistics;
 only the projection heads and the policy train, which resists overfitting on 45 demonstrations.
+
+``state_dim_out`` (balanced branches): the joint state gets its own MLP with as many outputs as each
+camera, and every branch ends in a LayerNorm, so cameras and state enter the policy at the same
+scale. Without it (the default, as in the first models) the raw 36 state values sit next to 512
+camera features and carry about 0.2% of the feature magnitude, and the policy ignores them.
 """
 
 from __future__ import annotations
@@ -28,10 +33,15 @@ class ResNetExtractor(BaseFeaturesExtractor):
         out_dim: int = 256,
         proj_channels: int = 64,
         freeze: bool = True,
+        state_dim_out: int | None = None,
+        state_hidden: int = 128,
     ):
         cameras = [k for k, s in observation_space.spaces.items() if len(s.shape) == 3]
         state_dim = sum(s.shape[0] for k, s in observation_space.spaces.items() if len(s.shape) == 1)
-        super().__init__(observation_space, features_dim=len(cameras) * out_dim + state_dim)
+        balanced = state_dim_out is not None
+        super().__init__(observation_space,
+                         features_dim=len(cameras) * out_dim + (state_dim_out if balanced else state_dim))
+        self.balanced = balanced
         self.cameras = cameras
         self.state_keys = [k for k, s in observation_space.spaces.items() if len(s.shape) == 1]
         self.freeze = freeze
@@ -49,10 +59,20 @@ class ResNetExtractor(BaseFeaturesExtractor):
             with torch.no_grad():
                 _, c, h, w = body.eval()(torch.zeros(1, 3, height, width)).shape
             self.backbones[key] = body
-            self.heads[key] = nn.ModuleDict({
+            head = {
                 "reduce": nn.Sequential(nn.Conv2d(c, proj_channels, 1), nn.ReLU()),
                 "project": nn.Sequential(nn.Linear(frames * proj_channels * h * w, out_dim), nn.ReLU()),
-            })
+            }
+            if balanced:
+                head["norm"] = nn.LayerNorm(out_dim)
+            self.heads[key] = nn.ModuleDict(head)
+        self.state_net = None
+        if balanced:
+            self.state_net = nn.Sequential(
+                nn.Linear(state_dim, state_hidden), nn.ReLU(),
+                nn.Linear(state_hidden, state_dim_out), nn.ReLU(),
+                nn.LayerNorm(state_dim_out),
+            )
         self.register_buffer("mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1))
         self.register_buffer("std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1))
 
@@ -63,6 +83,8 @@ class ResNetExtractor(BaseFeaturesExtractor):
         after building the extractor, which would overwrite the ImageNet weights with random ones.
         """
         self.heads.apply(fn)
+        if self.state_net is not None:
+            self.state_net.apply(fn)
         fn(self)
         return self
 
@@ -95,7 +117,10 @@ class ResNetExtractor(BaseFeaturesExtractor):
                     torch.autocast("cuda", dtype=torch.float16, enabled=half):
                 fmap = self.backbones[key](x).float()             # B*frames, 512, h, w
             z = self.heads[key]["reduce"](fmap)                   # B*frames, proj, h, w
-            parts.append(self.heads[key]["project"](z.reshape(b, -1)))
-        for key in self.state_keys:
-            parts.append(observations[key].float())
+            z = self.heads[key]["project"](z.reshape(b, -1))
+            if self.balanced:
+                z = self.heads[key]["norm"](z)
+            parts.append(z)
+        state = torch.cat([observations[key].float() for key in self.state_keys], dim=1)
+        parts.append(self.state_net(state) if self.balanced else state)
         return torch.cat(parts, dim=1)

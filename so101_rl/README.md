@@ -33,16 +33,39 @@ the mounted model (checked at load).
 
 ```powershell
 python make_bc_dataset.py                 # ~4 min, ~1.9 GB in outputs\bc_data
-python train_bc.py --epochs 80            # frozen ResNet18 encoders, then 40 closed-loop episodes
-python train_bc.py --view outputs\bc\resnet18_seed0\bc_model.zip
+python make_bc_dataset.py --perturb 3     # noise augmentation: ~13 min, ~5.2 GB
+# Current best recipe: current frame only, relative actions, noise copies, idle starts trimmed
+python train_bc.py --epochs 60 --history 1 --no-velocities --perturbed --action relative --trim-idle --run-name my_run
+python train_bc.py --eval outputs\bc\my_run\bc_model.zip    # 115 distinct episodes, 8 in parallel, ~8 min
+python train_bc.py --view outputs\bc\my_run\bc_model.zip
 tensorboard --logdir outputs\bc\tb
 ```
 
 The saved `bc_model.zip` is a PPO checkpoint, so PPO fine-tuning can start from it directly.
-Lessons so far: leave commanded targets out of BC observations (`include_targets=False`;
-otherwise BC copies its last command), and use pretrained encoders (a from-scratch CNN overfits
-the wrist camera on 45 demonstrations). Offline action error does not predict closed-loop success;
-judge runs by the closed-loop evaluation.
+Each run saves `bc_config.json` (observation and action settings, relative scales), which
+`--eval`, `--view` and `camera_ablation.py` use to rebuild the matching env.
+
+Closed-loop results (115 episodes, cube and box as in the demonstrations):
+
+| Change (cumulative) | Success | Lifted |
+|---|---|---|
+| ResNet18, balanced state branch, current frame, absolute actions | 1.7% | 12.2% |
+| + noise augmentation (3 copies, arm nudged by σ = 2.5°) | 4.3% | 18.3% |
+| + relative actions + idle starts trimmed (20 epochs) | 12.2% | 58.3% |
+
+Lessons:
+- Leave commanded targets out of the observations (`include_targets=False`), or BC copies its
+  last command.
+- Use pretrained encoders: a from-scratch CNN overfits the wrist camera on 45 demonstrations.
+- Predict motion (`--action relative`), not absolute targets: 87% of demonstrated commands are
+  within 1° of the measured arm, smaller than the policy's error on absolute targets.
+- Noise augmentation teaches recovery; select its final epoch (clean validation loss picks the
+  least-trained model).
+- Offline action error does not predict closed-loop success; judge runs by `--eval`.
+- With the cube and box fixed (as in this dataset) the policy relies on joint state, not vision;
+  demonstrations with varied cube positions are needed for a vision-based policy.
+- Remaining failure: the gripper closes ~1 cm too shallow on the cube, which slips out while
+  being carried.
 
 ## Run
 

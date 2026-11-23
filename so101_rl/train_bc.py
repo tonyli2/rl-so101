@@ -38,54 +38,129 @@ from stable_baselines3.common.env_util import make_vec_env
 from torch.utils.tensorboard import SummaryWriter
 
 from encoders import ResNetExtractor
-from envs import So101PickPlaceEnv, prepare_mounted
+from envs import So101PickPlaceEnv, So101World, prepare_mounted
 
 HERE = Path(__file__).parent
 DATA = HERE / "outputs" / "bc_data" / "sim-baseline.npz"
 OUT = HERE / "outputs" / "bc"
-HISTORY = 3
 VAL_EPISODES = set(range(45, 50))
+# Observation/action settings of the current run; saved as bc_config.json next to each model so
+# --eval and --view rebuild the same env. Runs without that file (or keys) used these defaults.
+OBS = {"history": 3, "velocities": True, "action": "absolute", "relative_scale": None, "trim_idle": False}
+IDLE_DEG = 1.0  # leading frames whose command is within this of the measured arm count as idle
+
+
+def configure(history: int = 3, velocities: bool = True, action: str = "absolute",
+              relative_scale: list | None = None, trim_idle: bool = False) -> None:
+    OBS.update(history=history, velocities=velocities, action=action,
+               relative_scale=relative_scale, trim_idle=trim_idle)
+
+
+def load_config(model_path: Path) -> None:
+    path = Path(model_path).parent / "bc_config.json"
+    configure(**(json.loads(path.read_text())["obs"] if path.is_file() else {}))
+    print(f"settings: {OBS}")
 
 
 def env_kwargs(**extra) -> dict:
-    """The env configuration BC is trained for (and PPO must use): fixed cube, absolute actions."""
-    return {"action_mode": "absolute", "image": True, "history": HISTORY, "cube_xy_range": (0.0, 0.0),
-            "include_targets": False, "wrist": True, **extra}
+    """The env configuration BC is trained for (and PPO must use): fixed cube, the run's action mode."""
+    kwargs = {"action_mode": OBS["action"], "image": True, "history": OBS["history"], "cube_xy_range": (0.0, 0.0),
+              "include_targets": False, "wrist": True, "include_velocities": OBS["velocities"]}
+    if OBS["action"] == "relative":
+        kwargs["relative_scale"] = OBS["relative_scale"]
+    return {**kwargs, **extra}
 
 
-# make_bc_dataset.py stores [qpos_n(6), qvel(6), targets(6)] per frame; BC drops the targets.
-STATE_COLUMNS = slice(0, 12)
+def state_columns() -> slice:
+    """make_bc_dataset.py stores [qpos_n(6), qvel(6), targets(6)] per frame; BC drops the targets."""
+    return slice(0, 12 if OBS["velocities"] else 6)
 
 
 class Demos:
-    """Single-frame demo arrays on the GPU, stacked into env-style 3-step histories on demand."""
+    """Single-frame demo arrays, stacked into env-style histories on demand.
 
-    def __init__(self, path: Path, device: torch.device):
+    ``perturbed``: also load make_bc_dataset.py's noise-augmented copies of the training frames
+    (training only; validation stays clean). Each copy is its own single-frame sample, so this
+    requires history 1. With it, images live in CPU memory (4x the frames do not fit on the GPU).
+    """
+
+    def __init__(self, path: Path, device: torch.device, perturbed: Path | None = None):
         d = np.load(path)
-        self.episode = d["episode"].astype(np.int64)
-        frame = d["frame"].astype(np.int64)
-        # History indices [t-2, t-1, t], repeating the first frame at episode start like env.reset.
-        idx = np.arange(len(frame))
-        self.hist = np.stack([idx - np.minimum(frame, k) for k in range(HISTORY - 1, -1, -1)], axis=1)
-        self.states = torch.as_tensor(d["states"][:, STATE_COLUMNS], device=device)
-        # Camera key -> N,3,H,W uint8 frames on the device.
-        self.cameras = {"front": torch.as_tensor(d["images"], device=device).permute(0, 3, 1, 2).contiguous()}
-        if "wrist_images" in d.files:
-            self.cameras["wrist"] = torch.as_tensor(d["wrist_images"], device=device).permute(0, 3, 1, 2).contiguous()
-        else:
+        clean = len(d["frame"])
+        arrays = {k: d[k] for k in ("states", "images", "wrist_images", "actions", "episode", "frame")
+                  if k in d.files}
+        if "wrist_images" not in arrays:
             raise SystemExit("Dataset has no wrist images: re-run make_bc_dataset.py")
-        self.actions = torch.as_tensor(d["actions"], device=device)
-        self.starts = d["states"][frame == 0]  # first observation of each episode (normalized joints first)
-        self.start_episode = self.episode[frame == 0]
-        val = np.isin(self.episode, list(VAL_EPISODES))
-        self.train_idx, self.val_idx = np.flatnonzero(~val), np.flatnonzero(val)
+        if perturbed is not None:
+            if OBS["history"] != 1:
+                raise SystemExit("Perturbed copies are single frames: use --history 1")
+            p = np.load(perturbed)
+            arrays = {k: np.concatenate([v, p[k]]) for k, v in arrays.items()}
+        self.episode = arrays["episode"].astype(np.int64)
+        frame = arrays["frame"].astype(np.int64)
+        n = len(frame)
+        self.is_perturbed = np.arange(n) >= clean
+        # History indices [t-h+1, ..., t] within the clean episode, repeating the first frame at the
+        # start like env.reset. Perturbed copies (history 1) index only themselves.
+        idx = np.arange(n)
+        history = OBS["history"]
+        self.hist = np.stack([idx - np.minimum(frame, k) for k in range(history - 1, -1, -1)], axis=1)
+        self.hist[self.is_perturbed] = idx[self.is_perturbed, None]
         self.device = device
+        self.image_device = torch.device("cpu") if perturbed is not None else device
+        self.states = torch.as_tensor(arrays["states"][:, state_columns()], device=device)
+        # Camera key -> N,3,H,W uint8 frames.
+        self.cameras = {
+            key: torch.as_tensor(arrays[src], device=self.image_device).permute(0, 3, 1, 2).contiguous()
+            for key, src in (("front", "images"), ("wrist", "wrist_images"))
+        }
+        first = (frame == 0) & ~self.is_perturbed
+        self.starts = arrays["states"][first]  # first observation of each episode (normalized joints first)
+        self.start_episode = self.episode[first]
+        val = np.isin(self.episode, list(VAL_EPISODES))
+        if (val & self.is_perturbed).any():
+            raise SystemExit("Perturbed data contains validation episodes")
+
+        # Labels. Stored actions are absolute targets in [-1, 1] over each actuator's range; the
+        # first six state values are the measured joints on the same scale (nudged ones for copies).
+        world = So101World()
+        lo, hi = world.lo, world.hi
+        self.span = hi - lo
+        joints = (arrays["states"][:, :6] + 1) / 2 * self.span + lo
+        target = (arrays["actions"] + 1) / 2 * self.span + lo
+        motion = target - joints                                   # radians the command asks to move
+        # Leading idle frames: the human had not started moving (command ~ measured arm).
+        moving = np.rad2deg(np.abs(motion[:, :5])).max(1) > IDLE_DEG
+        lead = {ep: int(np.argmax(moving[(self.episode == ep) & ~self.is_perturbed]))
+                for ep in np.unique(self.episode)}
+        idle = frame < np.array([lead[ep] for ep in self.episode])
+        keep = ~idle if OBS["trim_idle"] else np.ones(n, bool)
+        if OBS["action"] == "relative":
+            if OBS["relative_scale"] is None:  # 99th percentile of real motion per joint (training, clean)
+                ref = ~val & ~self.is_perturbed & keep
+                OBS["relative_scale"] = np.maximum(np.percentile(np.abs(motion[ref]), 99, axis=0),
+                                                   np.deg2rad(0.5)).tolist()
+            scale = np.asarray(OBS["relative_scale"])
+            labels = np.clip(motion / scale, -1, 1)
+            self.half_range = scale            # one unit of action = scale radians
+        else:
+            labels = arrays["actions"]
+            self.half_range = self.span / 2
+        self.actions = torch.as_tensor(labels.astype(np.float32), device=device)
+        self.train_idx = np.flatnonzero(~val & keep)
+        self.val_idx = np.flatnonzero(val & keep)
+        print(f"frames: {clean} clean + {int(self.is_perturbed.sum())} perturbed; images on {self.image_device}; "
+              f"actions {OBS['action']}; idle start frames {'trimmed' if OBS['trim_idle'] else 'kept'} "
+              f"({int((idle & ~self.is_perturbed).sum())} clean idle frames)")
+        if OBS["action"] == "relative":
+            print("relative action scale (deg; gripper rad->deg too):", np.rad2deg(scale).round(2).tolist())
 
     def batch(self, idx: np.ndarray, shift: int = 0) -> tuple[dict, torch.Tensor]:
-        h = torch.as_tensor(self.hist[idx], device=self.device)                 # B,3
-        obs = {"state": self.states[h].reshape(len(idx), -1)}                   # B,3*S
+        h = torch.as_tensor(self.hist[idx])                                       # B,history
+        obs = {"state": self.states[h.to(self.device)].reshape(len(idx), -1)}     # B,history*S
         for key, frames in self.cameras.items():
-            image = frames[h].reshape(len(idx), -1, *frames.shape[2:])          # B,9,H,W
+            image = frames[h.to(self.image_device)].reshape(len(idx), -1, *frames.shape[2:])
+            image = image.to(self.device, non_blocking=True)                     # B,3*history,H,W
             obs[key] = random_shift(image, shift) if shift else image
         return obs, self.actions[torch.as_tensor(idx, device=self.device)]
 
@@ -104,7 +179,7 @@ def random_shift(images: torch.Tensor, pad: int) -> torch.Tensor:
     return out.to(images.dtype)
 
 
-def evaluate_offline(model: PPO, demos: Demos, idx: np.ndarray, span: np.ndarray, batch: int = 512) -> dict:
+def evaluate_offline(model: PPO, demos: Demos, idx: np.ndarray, batch: int = 512) -> dict:
     """Validation NLL and per-joint RMSE of the mean action (arm joints in degrees, gripper in %)."""
     policy = model.policy
     policy.set_training_mode(False)
@@ -116,9 +191,9 @@ def evaluate_offline(model: PPO, demos: Demos, idx: np.ndarray, span: np.ndarray
             nll.append(-dist.log_prob(act).cpu())
             se.append(((dist.distribution.mean.clamp(-1, 1) - act) ** 2).cpu())
     rmse_norm = torch.cat(se).mean(0).sqrt().numpy()
-    rmse = rmse_norm / 2 * span                      # normalized -> actuator radians
+    rmse = rmse_norm * demos.half_range              # normalized -> actuator radians (either action mode)
     units = np.rad2deg(rmse)
-    units[5] = rmse_norm[5] / 2 * 100                 # gripper: percent of its range
+    units[5] = rmse[5] / demos.span[5] * 100         # gripper: percent of its range
     return {"nll": float(torch.cat(nll).mean()), "action_rmse": units.round(3).tolist()}
 
 
@@ -157,37 +232,92 @@ def rollout_eval(model: PPO, starts: list[np.ndarray], seed: int, episode_steps:
     }
 
 
-def start_poses(demos: Demos, world, episodes: set[int], noise_deg: float, repeats: int, seed: int):
-    """Start joints of the given demo episodes, optionally repeated with small random offsets."""
+def start_poses(demos: Demos, world, episodes: set[int], noise_deg: float = 0.0, copies: int = 1,
+                seed: int = 0) -> list[np.ndarray]:
+    """Start joints of the given demo episodes: exact (noise 0) or ``copies`` distinct jittered ones."""
     rng = np.random.default_rng(seed)
     out = []
     for s, ep in zip(demos.starts, demos.start_episode):
         if ep not in episodes:
             continue
         q = (s[:6] + 1) / 2 * (world.hi - world.lo) + world.lo  # first 6 state entries: normalized joints
-        for r in range(repeats):
+        for _ in range(copies):
             jitter = np.zeros(6)
-            if noise_deg and r:
+            if noise_deg:
                 jitter[:5] = np.deg2rad(rng.uniform(-noise_deg, noise_deg, 5))
             out.append(q + jitter)
     return out
 
 
-def full_eval(model: PPO, demos: Demos, run: Path | None, seed: int) -> dict:
-    world = So101PickPlaceEnv(**env_kwargs()).world
-    val_starts = start_poses(demos, world, VAL_EPISODES, 0.0, 1, seed)
-    train_starts = start_poses(demos, world, set(range(45)), 3.0, 1, seed)[::3]  # 15 training starts
-    jittered = start_poses(demos, world, VAL_EPISODES, 3.0, 4, seed)            # val starts + 3 jitters
-    world.close()
-    video = run / "rollout_val0.mp4" if run else None
-    result = {
-        "val_starts": rollout_eval(model, val_starts, seed, video=video),
-        "val_starts_jitter3deg": rollout_eval(model, jittered, seed + 100),
-        "train_starts": rollout_eval(model, train_starts, seed + 200),
+def rollout_parallel(model: PPO, starts: list[np.ndarray], n_envs: int = 8, episode_steps: int = 900) -> dict:
+    """Closed-loop episodes from the given start joints, ``n_envs`` at a time in subprocesses."""
+    from functools import partial
+
+    from stable_baselines3.common.vec_env import SubprocVecEnv
+
+    venv = SubprocVecEnv([partial(So101PickPlaceEnv, **env_kwargs(episode_steps=episode_steps))] * n_envs)
+    results = []
+    try:
+        for c in range(0, len(starts), n_envs):
+            chunk = starts[c : c + n_envs]
+            padded = chunk + [chunk[-1]] * (n_envs - len(chunk))  # extra envs repeat a start; ignored
+            venv.set_options([{"joints": q} for q in padded])
+            obs = venv.reset()
+            done = np.zeros(n_envs, bool)
+            lifted, in_box = np.zeros(n_envs, bool), np.zeros(n_envs, bool)
+            outcome = [None] * n_envs
+            steps = 0
+            while not done.all() and steps < episode_steps:
+                action, _ = model.predict(obs, deterministic=True)
+                obs, _, dones, infos = venv.step(action)
+                steps += 1
+                for i, info in enumerate(infos):
+                    if done[i]:
+                        continue  # this env auto-reset into another episode: ignore it
+                    lifted[i] |= info["cube_lifted"]
+                    in_box[i] |= info["cube_in_box"]
+                    if dones[i]:
+                        done[i] = True
+                        outcome[i] = {"success": bool(info["is_success"]), "lifted": bool(lifted[i]),
+                                      "in_box": bool(in_box[i]), "steps": steps}
+            results.extend(outcome[: len(chunk)])
+    finally:
+        venv.close()
+    n = len(results)
+    return {
+        "episodes": n,
+        "success_rate": sum(r["success"] for r in results) / n,
+        "lifted_rate": sum(r["lifted"] for r in results) / n,
+        "in_box_rate": sum(r["in_box"] for r in results) / n,
+        "per_episode": results,
     }
+
+
+def full_eval(model: PPO, demos: Demos, run: Path | None, seed: int) -> dict:
+    """115 distinct closed-loop episodes from demonstration starts (cube and box as in the demos)."""
+    torch.backends.cudnn.deterministic = True   # repeatable inference: identical starts, identical outcomes
+    torch.backends.cudnn.benchmark = False
+    world = So101PickPlaceEnv(**env_kwargs()).world
+    val, train = VAL_EPISODES, set(range(45))
+    groups = {
+        "val_exact": start_poses(demos, world, val),                                # 5
+        "val_jitter3deg": start_poses(demos, world, val, 3.0, 4, seed),             # 20
+        "train_exact": start_poses(demos, world, train),                            # 45
+        "train_jitter3deg": start_poses(demos, world, train, 3.0, 1, seed + 1),     # 45
+    }
+    world.close()
+    if run is not None:  # one recorded episode for a visual check
+        rollout_eval(model, groups["val_exact"][:1], seed, video=run / "rollout_val0.mp4")
+    result = {name: rollout_parallel(model, starts) for name, starts in groups.items()}
+    total = sum(r["episodes"] for r in result.values())
     for name, r in result.items():
-        print(f"{name:22s} success {r['success_rate']:.0%}  lifted {r['lifted_rate']:.0%}  "
-              f"in box {r['in_box_rate']:.0%}  ({r['episodes']} episodes)")
+        print(f"{name:18s} success {r['success_rate']:5.1%}  lifted {r['lifted_rate']:5.1%}  "
+              f"in box {r['in_box_rate']:5.1%}  ({r['episodes']} episodes)")
+    overall = {m: sum(r[m] * r["episodes"] for r in result.values()) / total
+               for m in ("success_rate", "lifted_rate", "in_box_rate")}
+    print(f"{'ALL':18s} success {overall['success_rate']:5.1%}  lifted {overall['lifted_rate']:5.1%}  "
+          f"in box {overall['in_box_rate']:5.1%}  ({total} episodes)")
+    result["all"] = {"episodes": total, **overall}
     return result
 
 
@@ -223,6 +353,17 @@ def main() -> None:
     parser.add_argument("--encoder", choices=("resnet18", "nature"), default="resnet18",
                         help="resnet18: frozen ImageNet ResNet18 per camera; nature: small CNN from scratch")
     parser.add_argument("--run-name", help="output folder under outputs/bc (default <encoder>_seed<N>)")
+    parser.add_argument("--state-net", action=argparse.BooleanOptionalAction, default=True,
+                        help="balanced branches: state MLP + LayerNorm per branch (resnet18 only)")
+    parser.add_argument("--history", type=int, default=3, help="observation history length (1 = current only)")
+    parser.add_argument("--velocities", action=argparse.BooleanOptionalAction, default=True,
+                        help="include joint velocities in the state")
+    parser.add_argument("--perturbed", action="store_true",
+                        help="add the noise-augmented training copies (make_bc_dataset.py --perturb K); needs --history 1")
+    parser.add_argument("--action", choices=("relative", "absolute"), default="relative",
+                        help="relative: motion from the measured joints; absolute: target positions")
+    parser.add_argument("--trim-idle", action=argparse.BooleanOptionalAction, default=True,
+                        help="drop each demonstration's leading idle frames (human not moving yet)")
     parser.add_argument("--eval", type=Path, help="evaluate a saved BC model")
     parser.add_argument("--view", type=Path, help="watch a saved BC model from the validation starts")
     args = parser.parse_args()
@@ -231,7 +372,16 @@ def main() -> None:
 
     prepare_mounted(rebuild=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    demos = Demos(DATA, device)
+    if args.view or args.eval:
+        load_config(args.view or args.eval)
+    else:
+        configure(args.history, args.velocities, args.action, None, args.trim_idle)
+    perturbed = None
+    if args.perturbed and not (args.view or args.eval):
+        perturbed = DATA.with_name("sim-baseline-perturbed.npz")
+        if not perturbed.is_file():
+            sys.exit(f"{perturbed} missing: run make_bc_dataset.py --perturb 3")
+    demos = Demos(DATA, device, perturbed=perturbed)
     print(f"{len(demos.train_idx)} train / {len(demos.val_idx)} val frames on {device}")
 
     if args.view or args.eval:
@@ -239,18 +389,25 @@ def main() -> None:
         if args.view:
             view(model, demos)
         else:
-            print(json.dumps(full_eval(model, demos, None, seed=10_000), indent=2)[:2000])
+            result = full_eval(model, demos, None, seed=10_000)
+            out = Path(args.eval).parent / "closed_loop_eval.json"
+            out.write_text(json.dumps(result, indent=2))
+            print(f"saved {out}")
         return
 
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     run = OUT / (args.run_name or f"{args.encoder}_seed{args.seed}")
     run.mkdir(parents=True, exist_ok=True)
+    (run / "bc_config.json").write_text(json.dumps({"obs": OBS, "args": {
+        k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}}, indent=2))
     venv = make_vec_env(So101PickPlaceEnv, n_envs=1, seed=args.seed, env_kwargs=env_kwargs())
     policy_kwargs = {"net_arch": {"pi": [256, 256], "vf": [256, 256]}, "log_std_init": -1.0}
     if args.encoder == "resnet18":
-        policy_kwargs.update(features_extractor_class=ResNetExtractor,
-                             features_extractor_kwargs={"freeze": True})
+        extractor_kwargs = {"freeze": True}
+        if args.state_net:
+            extractor_kwargs["state_dim_out"] = 256  # same width as each camera branch
+        policy_kwargs.update(features_extractor_class=ResNetExtractor, features_extractor_kwargs=extractor_kwargs)
     model = PPO("MultiInputPolicy", venv, seed=args.seed, device=device, verbose=0, policy_kwargs=policy_kwargs)
     if args.encoder == "resnet18" and not model.policy.features_extractor.matches_imagenet():
         sys.exit("ResNet backbones lost their ImageNet weights during policy construction")
@@ -281,7 +438,7 @@ def main() -> None:
             optimizer.step()
             scheduler.step()
             losses.append(loss.item())
-        val = evaluate_offline(model, demos, demos.val_idx, span)
+        val = evaluate_offline(model, demos, demos.val_idx)
         history.append({"epoch": epoch, "train_nll": float(np.mean(losses)), **val})
         writer.add_scalar("loss/train_nll", float(np.mean(losses)), epoch)
         writer.add_scalar("loss/val_nll", val["nll"], epoch)
@@ -291,8 +448,11 @@ def main() -> None:
         print(f"epoch {epoch:3d}  train nll {np.mean(losses):7.3f}  val nll {val['nll']:7.3f}  "
               f"val rmse deg {val['action_rmse'][:5]} grip% {val['action_rmse'][5]}  "
               f"({time.time() - start:.0f}s)", flush=True)
-        if val["nll"] < best:
-            best = val["nll"]
+        # Validation frames are clean, so with noise-augmented training their loss rewards staying
+        # close to clean behavior, not recovering: it picked the epoch-1 model (0% success) over
+        # epoch 20 (12%). Those runs keep the final epoch instead.
+        if args.perturbed or val["nll"] < best:
+            best = min(best, val["nll"])
             model.save(run / "bc_model.zip")
     model.save(run / "bc_model_last.zip")
 

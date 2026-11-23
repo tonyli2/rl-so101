@@ -13,7 +13,9 @@ rewards only; the reach target is given to the policy because it has no other wa
 
 Actions: six values in [-1, 1], five arm joint-position targets and a gripper command, tracked by
 the model's position servos. ``action_mode="delta"`` moves the current targets by at most
-``delta_scale`` radians per step; ``"absolute"`` maps [-1, 1] onto each actuator's control range.
+``delta_scale`` radians per step; ``"absolute"`` maps [-1, 1] onto each actuator's control range;
+``"relative"`` sets the target to the measured joints plus ``action * relative_scale`` (the motion
+from where the arm is now, which BC predicts far more precisely than an absolute target).
 
 The physical knobs the experiments vary are exposed on ``So101World``: ``set_object_friction``
 (object-finger sliding friction). Visual randomization (texture, lighting, camera pose) is added in
@@ -320,16 +322,24 @@ class _So101TaskEnv(gym.Env):
         variant: str = "mounted",
         include_targets: bool = True,
         wrist: bool = False,
+        include_velocities: bool = True,
+        relative_scale=None,
     ):
         super().__init__()
+        # "relative" actions: target = measured joints + action * relative_scale (radians per joint).
+        self.relative_scale = None if relative_scale is None else np.asarray(relative_scale, dtype=np.float64)
+        if action_mode == "relative" and (self.relative_scale is None or self.relative_scale.shape != (6,)):
+            raise ValueError("action_mode='relative' needs relative_scale: six per-joint scales in radians")
+        # Joint velocities (and a multi-step history) also let BC extrapolate its own recent motion.
+        self.include_velocities = include_velocities
         # Gripper-mounted camera as a second image ("wrist" key); it sees the cube between the
         # fingers when the arm blocks the overhead view during the grasp.
         self.wrist = wrist and image
         # Commanded targets (= the previous action) in the observation. BC must leave them out:
         # with them it learns to copy its last command ("copycat") instead of reading the image.
         self.include_targets = include_targets
-        if action_mode not in ("delta", "absolute"):
-            raise ValueError("action_mode must be 'delta' or 'absolute'")
+        if action_mode not in ("delta", "absolute", "relative"):
+            raise ValueError("action_mode must be 'delta', 'absolute' or 'relative'")
         self.episode_steps = episode_steps
         self.action_mode = action_mode
         self.delta_scale = delta_scale
@@ -371,7 +381,9 @@ class _So101TaskEnv(gym.Env):
         w = self.world
         span = w.hi - w.lo
         qpos_n = 2 * (w.qpos - w.lo) / span - 1
-        parts = [qpos_n, w.qvel * self.QVEL_SCALE]
+        parts = [qpos_n]
+        if getattr(self, "include_velocities", True):
+            parts.append(w.qvel * self.QVEL_SCALE)
         if self.include_targets:
             parts.append(2 * (self._target_ctrl - w.lo) / span - 1)
         parts.append(self._task_state())
@@ -424,6 +436,9 @@ class _So101TaskEnv(gym.Env):
         a = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
         if self.action_mode == "delta":
             self._target_ctrl = np.clip(self._target_ctrl + a * self.delta_scale, w.lo, w.hi)
+        elif self.action_mode == "relative":
+            # Motion from where the arm is now (measured), not from the last command.
+            self._target_ctrl = np.clip(w.qpos + a * self.relative_scale, w.lo, w.hi)
         else:
             self._target_ctrl = w.lo + (a + 1) / 2 * (w.hi - w.lo)
         w.step(self._target_ctrl)
