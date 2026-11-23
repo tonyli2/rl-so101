@@ -138,8 +138,8 @@ class So101World:
         self.finger_geoms = np.flatnonzero(m.geom_priority == 1)
         self.nominal_friction = float(m.geom_friction[self.finger_geoms[0], 0])
         self._ik_data = mujoco.MjData(m)
-        self._renderer: mujoco.Renderer | None = None
-        self._renderer_size: tuple[int, int] | None = None
+        # One renderer per image size: recreating a renderer (a new GL context) costs ~100 ms.
+        self._renderers: dict[tuple[int, int], mujoco.Renderer] = {}
         mujoco.mj_forward(m, self.data)
         self._pointing = self._pointing_axis()
         self.base_pos = self.data.xpos[self.base_body].copy()
@@ -287,18 +287,16 @@ class So101World:
 
     # --- rendering ---------------------------------------------------------------------------
     def render(self, camera: str, height: int, width: int) -> np.ndarray:
-        if self._renderer is None or self._renderer_size != (height, width):
-            if self._renderer is not None:
-                self._renderer.close()
-            self._renderer = mujoco.Renderer(self.model, height, width)
-            self._renderer_size = (height, width)
-        self._renderer.update_scene(self.data, camera=camera)
-        return self._renderer.render().copy()
+        renderer = self._renderers.get((height, width))
+        if renderer is None:
+            renderer = self._renderers[(height, width)] = mujoco.Renderer(self.model, height, width)
+        renderer.update_scene(self.data, camera=camera)
+        return renderer.render().copy()
 
     def close(self) -> None:
-        if self._renderer is not None:
-            self._renderer.close()
-            self._renderer = None
+        for renderer in self._renderers.values():
+            renderer.close()
+        self._renderers.clear()
 
 
 class _So101TaskEnv(gym.Env):
@@ -320,8 +318,16 @@ class _So101TaskEnv(gym.Env):
         joint_noise_deg: float = 2.0,
         render_mode: str | None = "rgb_array",
         variant: str = "mounted",
+        include_targets: bool = True,
+        wrist: bool = False,
     ):
         super().__init__()
+        # Gripper-mounted camera as a second image ("wrist" key); it sees the cube between the
+        # fingers when the arm blocks the overhead view during the grasp.
+        self.wrist = wrist and image
+        # Commanded targets (= the previous action) in the observation. BC must leave them out:
+        # with them it learns to copy its last command ("copycat") instead of reading the image.
+        self.include_targets = include_targets
         if action_mode not in ("delta", "absolute"):
             raise ValueError("action_mode must be 'delta' or 'absolute'")
         self.episode_steps = episode_steps
@@ -341,6 +347,7 @@ class _So101TaskEnv(gym.Env):
         self._steps = 0
         self._target_ctrl = self.home.copy()
         self._frames: deque = deque(maxlen=history)
+        self._wrist_frames: deque = deque(maxlen=history)
         self._states: deque = deque(maxlen=history)
 
         self.action_space = spaces.Box(-1.0, 1.0, (6,), np.float32)
@@ -349,6 +356,8 @@ class _So101TaskEnv(gym.Env):
         if image:
             h, w = image_size
             spaces_dict["front"] = spaces.Box(0, 255, (h, w, 3 * history), np.uint8)
+            if self.wrist:
+                spaces_dict["wrist"] = spaces.Box(0, 255, (h, w, 3 * history), np.uint8)
         self.observation_space = spaces.Dict(spaces_dict) if image else spaces_dict["state"]
 
     # Subclasses: task-specific reset, observation extras, reward.
@@ -362,36 +371,46 @@ class _So101TaskEnv(gym.Env):
         w = self.world
         span = w.hi - w.lo
         qpos_n = 2 * (w.qpos - w.lo) / span - 1
-        target_n = 2 * (self._target_ctrl - w.lo) / span - 1
-        return np.concatenate(
-            [qpos_n, w.qvel * self.QVEL_SCALE, target_n, self._task_state()]
-        ).astype(np.float32)
+        parts = [qpos_n, w.qvel * self.QVEL_SCALE]
+        if self.include_targets:
+            parts.append(2 * (self._target_ctrl - w.lo) / span - 1)
+        parts.append(self._task_state())
+        return np.concatenate(parts).astype(np.float32)
+
+    WRIST_CAMERA = "wrist_cam"
 
     def _observe(self, fresh: bool = False):
         state = self._state_vector()
-        frame = None
+        frame = wrist = None
         if self.image:
             frame = self.world.render(self.camera, *self.image_size)
-        if fresh:
-            self._states.clear()
-            self._frames.clear()
-            for _ in range(self.history):
-                self._states.append(state)
-                if frame is not None:
-                    self._frames.append(frame)
-        else:
-            self._states.append(state)
-            if frame is not None:
-                self._frames.append(frame)
+        if self.wrist:
+            wrist = self.world.render(self.WRIST_CAMERA, *self.image_size)
+        streams = [(self._states, state), (self._frames, frame), (self._wrist_frames, wrist)]
+        for buffer, item in streams:
+            if item is None:
+                continue
+            if fresh:
+                buffer.clear()
+                buffer.extend([item] * self.history)  # pad the history with the first frame
+            else:
+                buffer.append(item)
         flat = np.concatenate(self._states)
         if not self.image:
             return flat
-        return {"state": flat, "front": np.concatenate(self._frames, axis=-1)}
+        obs = {"state": flat, "front": np.concatenate(self._frames, axis=-1)}
+        if self.wrist:
+            obs["wrist"] = np.concatenate(self._wrist_frames, axis=-1)
+        return obs
 
     def reset(self, seed: int | None = None, options: dict | None = None):
+        """``options={"joints": q}`` starts from actuator-space joints ``q`` (radians) instead of HOME."""
         super().reset(seed=seed)
-        q = self.home.copy()
-        q[ARM] += self.np_random.uniform(-self.joint_noise, self.joint_noise, 5)
+        if options and options.get("joints") is not None:
+            q = np.asarray(options["joints"], dtype=np.float64).copy()
+        else:
+            q = self.home.copy()
+            q[ARM] += self.np_random.uniform(-self.joint_noise, self.joint_noise, 5)
         q = np.clip(q, self.world.lo, self.world.hi)
         self.world.reset(q)
         self._target_ctrl = q.copy()
@@ -478,7 +497,7 @@ class So101PickPlaceEnv(_So101TaskEnv):
 
     def __init__(
         self,
-        episode_steps: int = 300,
+        episode_steps: int = 900,  # demonstrations average 513 steps; Tony's evaluation deadline is 900
         cube_xy_range: tuple[float, float] = (0.04, 0.06),
         cube_yaw_range: float = 0.0,
         settle_steps: int = 15,
