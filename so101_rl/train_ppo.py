@@ -38,7 +38,7 @@ os.environ.setdefault("MUJOCO_GL", "egl" if sys.platform.startswith("linux") els
 import numpy as np
 import torch
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
 import train_bc
@@ -90,6 +90,29 @@ class ActorFreeze:
     def set(self, frozen: bool) -> None:
         for p, trainable in zip(self.params, self.trainable):
             p.requires_grad_(trainable and not frozen)
+
+
+class CurriculumCallback(BaseCallback):
+    """Ramp the randomization strength linearly from 0 (at ``start``) to 1 (at ``end``) steps.
+
+    Pilot finding: the BC policy scores 0% under full-range lighting or texture randomization, so
+    randomized PPO starting at full strength gets no successful episodes to learn from.
+    """
+
+    def __init__(self, start: int, end: int):
+        super().__init__()
+        self.start, self.end = start, max(end, start + 1)
+
+    def strength(self) -> float:
+        return float(np.clip((self.num_timesteps - self.start) / (self.end - self.start), 0.0, 1.0))
+
+    def _on_rollout_start(self) -> None:
+        s = self.strength()
+        self.training_env.set_attr("randomize_strength", s)
+        self.logger.record("train/randomize_strength", s)
+
+    def _on_step(self) -> bool:
+        return True
 
 
 class EvalCallback(BaseCallback):
@@ -159,6 +182,12 @@ def main() -> None:
                         choices=("texture", "lighting", "camera", "friction"),
                         help="randomized condition: resample these factors every training episode "
                              "(no names = all four). Evaluation stays nominal; sweeps are separate.")
+    parser.add_argument("--randomize-ranges", type=Path, default=HERE / "randomization_ranges.json",
+                        help="randomization.Ranges overrides (e.g. per-factor strength caps from "
+                             "calibrate_ranges.py); used when the file exists")
+    parser.add_argument("--randomize-curriculum", type=float, default=0.6,
+                        help="randomization strength ramps from 0 after the warm-up to full ranges at this "
+                             "fraction of --steps (0 = full strength from the start)")
     parser.add_argument("--train-encoder", action="store_true",
                         help="also fine-tune the encoder heads (shared with the new critic, whose early "
                              "gradients can disturb the actor's features); default keeps them at BC")
@@ -184,8 +213,15 @@ def main() -> None:
                                      start_jitter_deg=args.start_jitter, shaping_gamma=args.gamma)
     if args.randomize is not None:
         factors = args.randomize or ["texture", "lighting", "camera", "friction"]
-        env_kwargs["randomize"] = {"factors": factors}  # ranges: randomization.Ranges defaults
-        print(f"randomized training: {factors}")
+        ranges = {}
+        if args.randomize_ranges.is_file():  # calibrated by the pilot (calibrate_ranges.py)
+            ranges = json.loads(args.randomize_ranges.read_text())["ranges"]
+        env_kwargs["randomize"] = {"factors": factors, "ranges": ranges}
+        print(f"randomized training: {factors}; ranges from "
+              f"{args.randomize_ranges.name if ranges else 'randomization.Ranges defaults'}: {ranges}", flush=True)
+        cfg = json.loads((run / "ppo_config.json").read_text())
+        cfg["randomize"] = env_kwargs["randomize"]
+        (run / "ppo_config.json").write_text(json.dumps(cfg, indent=2))
     venv = SubprocVecEnv([partial(So101PickPlaceEnv, **env_kwargs)] * args.n_envs)
     venv.seed(args.seed)
 
@@ -206,9 +242,15 @@ def main() -> None:
         print(f"action std reset to {args.init_std}")
 
     history: list = []
-    callback = EvalCallback(evals, run, args.eval_every, history, OUT / "tb" / f"{args.run_name}_eval")
-    callback.init_callback(model)
-    callback.evaluate(0)  # the BC policy itself, same episodes: the bar PPO has to clear
+    eval_cb = EvalCallback(evals, run, args.eval_every, history, OUT / "tb" / f"{args.run_name}_eval")
+    eval_cb.init_callback(model)
+    eval_cb.evaluate(0)  # the BC policy itself, same episodes: the bar PPO has to clear
+    callback = eval_cb
+    if args.randomize is not None and args.randomize_curriculum > 0:
+        end = int(args.randomize_curriculum * args.steps)
+        venv.set_attr("randomize_strength", 0.0)  # the first resets happen before any rollout callback
+        callback = CallbackList([eval_cb, CurriculumCallback(args.warmup_steps, end)])
+        print(f"randomization curriculum: strength 0 until {args.warmup_steps} steps, full at {end}", flush=True)
 
     if not args.train_encoder:  # actor MLP, action head and std fine-tune; the critic learns on BC features
         for p in encoder_params(model.policy):
@@ -222,7 +264,7 @@ def main() -> None:
         freeze.set(False)
     model.learn(args.steps - args.warmup_steps, callback=callback, tb_log_name=args.run_name,
                 reset_num_timesteps=not args.warmup_steps)
-    callback.evaluate(model.num_timesteps)
+    eval_cb.evaluate(model.num_timesteps)
     model.save(run / "model_final.zip")
     venv.close()
     best = max(history, key=lambda r: (r["success_rate"], r["lifted_rate"]))

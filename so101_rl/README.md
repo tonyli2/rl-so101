@@ -95,6 +95,32 @@ Nominal pilot (from the 20-epoch BC model, 1M steps, 1.7 h): 12.5% -> 100% succe
 `run_main_experiment.py` runs the six main runs (nominal / randomized x seeds 1-3) back to back
 from `outputs/ppo/main_plan.json`, which it re-reads before each run.
 
+### Randomization ranges: curriculum and calibration
+
+Randomized PPO at the full `randomization.Ranges` defaults collapses: the BC starting policy cannot
+succeed there (lighting alone: 0% lifts), so PPO gets no successes to learn from. Without a
+curriculum it fell from 22.5% to 0% by 200k steps; with a curriculum it reached 67.5% at 300k and
+then fell to 5% as strength reached the full ranges. Two fixes, both now defaults:
+
+- **Curriculum** (`train_ppo.py --randomize-curriculum 0.6`): randomization strength is 0 during
+  the critic warm-up and ramps linearly to 1 at 60% of the steps.
+- **Calibrated ranges** (`calibrate_ranges.py`, written to `randomization_ranges.json`, read by
+  `train_ppo.py --randomize`): each factor is tested alone on the BC policy at 25/50/75% of its full
+  range; its cap is the largest strength keeping >= 2/3 of the nominal lift rate.
+
+| Lifted (16 episodes; nominal 44%) | 25% | 50% | 75% | 100% |
+|---|---|---|---|---|
+| texture | 38% | 31% | 25% | 25% |
+| lighting | 25% | 31% | 25% | 0% |
+| camera pose | 50% | 38% | 44% | 50% |
+| friction | 50% | 44% | 50% | 38% |
+
+Caps: texture 0.5, lighting 0.25 (the rule's 0.5 passed by one episode), camera 0.75, friction
+0.75; effective ranges at full strength: friction 0.55-1.15, light brightness x0.9-1.1, camera
+field of view +-2.2 deg. All four together at the caps: 19% lifted (factors compound).
+With these, `main_randomized_cal_s1` reached 95% at 300k and 100% at 400k on the nominal
+evaluation while training under full (calibrated) randomization.
+
 ## Run
 
 ```powershell

@@ -1,0 +1,86 @@
+{
+  "source": "calibrate_ranges.py on outputs/bc/resnet18_h1_dart_rel_e20_seed0_last (BC start of all PPO runs), 2026-11-23",
+  "rule": "per factor: largest tested strength whose lift rate stays >= 2/3 of nominal (16 episodes); lighting overridden to 0.25 (the script picked 0.5 on a one-episode margin; lighting is at or below the bar at 0.25/0.5/0.75 and 0% lifted at full strength)",
+  "combined_check": "all four factors together at these caps: BC 0% success / 19% lifted vs 6% / 44% nominal on the same 16 starts - comparable to where main_randomized_s2 still learned (strength ~0.5, ~13% training success) before collapsing at full strength",
+  "calibration": {
+    "model": "outputs\\bc\\resnet18_h1_dart_rel_e20_seed0_last\\bc_model.zip",
+    "episodes": 16,
+    "keep_fraction_of_nominal_lift": 0.6666666666666666,
+    "table": {
+      "nominal": {
+        "success": 0.0625,
+        "lifted": 0.4375
+      },
+      "texture": {
+        "0.25": {
+          "success": 0.0,
+          "lifted": 0.375
+        },
+        "0.5": {
+          "success": 0.0625,
+          "lifted": 0.3125
+        },
+        "0.75": {
+          "success": 0.1875,
+          "lifted": 0.25
+        }
+      },
+      "lighting": {
+        "0.25": {
+          "success": 0.0625,
+          "lifted": 0.25
+        },
+        "0.5": {
+          "success": 0.0,
+          "lifted": 0.3125
+        },
+        "0.75": {
+          "success": 0.0625,
+          "lifted": 0.25
+        }
+      },
+      "camera": {
+        "0.25": {
+          "success": 0.0,
+          "lifted": 0.5
+        },
+        "0.5": {
+          "success": 0.0,
+          "lifted": 0.375
+        },
+        "0.75": {
+          "success": 0.0625,
+          "lifted": 0.4375
+        }
+      },
+      "friction": {
+        "0.25": {
+          "success": 0.1875,
+          "lifted": 0.5
+        },
+        "0.5": {
+          "success": 0.0625,
+          "lifted": 0.4375
+        },
+        "0.75": {
+          "success": 0.1875,
+          "lifted": 0.5
+        }
+      }
+    },
+    "suggested_caps": {
+      "texture": 0.5,
+      "lighting": 0.5,
+      "camera": 0.75,
+      "friction": 0.75
+    }
+  },
+  "ranges": {
+    "factor_strength": {
+      "texture": 0.5,
+      "lighting": 0.25,
+      "camera": 0.75,
+      "friction": 0.75
+    }
+  }
+}

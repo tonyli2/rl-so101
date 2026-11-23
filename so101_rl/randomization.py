@@ -75,6 +75,10 @@ class Ranges:
     camera_rot_deg: float = 3.0         # +- about each axis
     camera_fovy_deg: float = 3.0        # +- vertical field of view
     friction: tuple = (0.4, 1.2)        # object-finger sliding friction
+    # Per-factor cap on strength (0-1), from the calibration pilot (calibrate_ranges.py): each
+    # factor's ranges are scaled by curriculum strength x its cap.
+    factor_strength: dict = field(default_factory=lambda: {"texture": 1.0, "lighting": 1.0,
+                                                           "camera": 1.0, "friction": 1.0})
 
 
 class Randomizer:
@@ -102,24 +106,37 @@ class Randomizer:
         self.friction0 = world.nominal_friction
 
     # --- sampling -----------------------------------------------------------------------------
-    def sample(self, rng: np.random.Generator, ranges: Ranges, factors=("texture", "lighting", "camera", "friction")) -> dict:
+    def sample(self, rng: np.random.Generator, ranges: Ranges, factors=("texture", "lighting", "camera", "friction"),
+               strength: float = 1.0) -> dict:
+        """Draw a setting. ``strength`` in [0, 1] shrinks every range toward nominal (curriculum):
+        0 = nominal, 1 = the full ranges. Textures: each surface keeps its nominal look with
+        probability 1 - strength."""
+        base = float(np.clip(strength, 0.0, 1.0))
+        cap = {"texture": 1.0, "lighting": 1.0, "camera": 1.0, "friction": 1.0, **ranges.factor_strength}
         p: dict = {}
         n_lights = len(self.light_dir0)
+        s = base * cap["texture"]
         if "texture" in factors:
-            p["texture"] = {s: {"tex": int(rng.choice(ranges.textures)),
-                                "tint": rng.uniform(-ranges.tint, ranges.tint, 3).tolist()}
-                            for s in self.surface_mats}
+            p["texture"] = {surf: {"tex": int(rng.choice(ranges.textures)),
+                                   "tint": (s * rng.uniform(-ranges.tint, ranges.tint, 3)).tolist()}
+                            for surf in self.surface_mats if rng.random() < s}
+        s = base * cap["lighting"]
+        toward = lambda nominal, lo, hi: (nominal + s * (lo - nominal), nominal + s * (hi - nominal))  # noqa: E731
         if "lighting" in factors:
-            p["lighting"] = {"tilt_deg": rng.uniform(-ranges.light_dir_deg, ranges.light_dir_deg, (n_lights, 2)).tolist(),
-                             "scale": float(rng.uniform(*ranges.light_scale)),
-                             "tint": rng.uniform(-ranges.light_tint, ranges.light_tint, 3).tolist(),
-                             "ambient": float(rng.uniform(*ranges.ambient))}
+            a0 = float(np.mean(self.ambient0))
+            p["lighting"] = {"tilt_deg": (s * rng.uniform(-ranges.light_dir_deg, ranges.light_dir_deg, (n_lights, 2))).tolist(),
+                             "scale": float(rng.uniform(*toward(1.0, *ranges.light_scale))),
+                             "tint": (s * rng.uniform(-ranges.light_tint, ranges.light_tint, 3)).tolist(),
+                             "ambient": float(rng.uniform(*toward(a0, *ranges.ambient)))}
+        s = base * cap["camera"]
         if "camera" in factors:
-            p["camera"] = {"pos_m": rng.uniform(-ranges.camera_pos_m, ranges.camera_pos_m, 3).tolist(),
-                           "rot_deg": rng.uniform(-ranges.camera_rot_deg, ranges.camera_rot_deg, 3).tolist(),
-                           "fovy_deg": float(rng.uniform(-ranges.camera_fovy_deg, ranges.camera_fovy_deg))}
+            p["camera"] = {"pos_m": (s * rng.uniform(-ranges.camera_pos_m, ranges.camera_pos_m, 3)).tolist(),
+                           "rot_deg": (s * rng.uniform(-ranges.camera_rot_deg, ranges.camera_rot_deg, 3)).tolist(),
+                           "fovy_deg": float(s * rng.uniform(-ranges.camera_fovy_deg, ranges.camera_fovy_deg))}
+        s = base * cap["friction"]
+        toward = lambda nominal, lo, hi: (nominal + s * (lo - nominal), nominal + s * (hi - nominal))  # noqa: E731
         if "friction" in factors:
-            p["friction"] = float(rng.uniform(*ranges.friction))
+            p["friction"] = float(rng.uniform(*toward(self.friction0, *ranges.friction)))
         return p
 
     # --- applying -----------------------------------------------------------------------------

@@ -537,6 +537,7 @@ class So101PickPlaceEnv(_So101TaskEnv):
         #   fixed_factors={...} applies one fixed setting (evaluation sweeps). Default: nominal.
         self.randomize = randomize
         self.fixed_factors = fixed_factors
+        self.randomize_strength = 1.0  # curriculum: 0 = nominal .. 1 = full ranges (set via VecEnv.set_attr)
         self._randomizer = None
         self.last_factors: dict = {}
         self.cube_xy_range = np.asarray(cube_xy_range)
@@ -584,7 +585,8 @@ class So101PickPlaceEnv(_So101TaskEnv):
         else:
             ranges = randomization.Ranges(**self.randomize.get("ranges", {}))
             factors = self.randomize.get("factors", ("texture", "lighting", "camera", "friction"))
-            self.last_factors = self._randomizer.sample(self.np_random, ranges, factors)
+            self.last_factors = self._randomizer.sample(self.np_random, ranges, factors,
+                                                        strength=getattr(self, "randomize_strength", 1.0))
         self._randomizer.apply(self.last_factors)
 
     def _reset_task(self) -> None:
