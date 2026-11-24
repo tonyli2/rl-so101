@@ -1,0 +1,55 @@
+{
+  "name": "wrist",
+  "width": 640,
+  "height": 480,
+  "model": "opencv_plumb_bob5_k3_fixed_0",
+  "camera_matrix": [
+    [
+      545.2797468152232,
+      0.0,
+      320.1538827575579
+    ],
+    [
+      0.0,
+      545.4567457041771,
+      254.5538820443492
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "distortion": [
+    -0.43508348211147796,
+    0.19229427305764474,
+    -0.0005986085186731004,
+    0.002976485261916446,
+    0.0
+  ],
+  "fx": 545.2797468152232,
+  "fy": 545.4567457041771,
+  "cx": 320.1538827575579,
+  "cy": 254.5538820443492,
+  "fov_x_deg": 60.813486788141375,
+  "fov_y_deg": 47.498818590116905,
+  "rms_reprojection_px": 0.2529917660622391,
+  "views_used": 40,
+  "views_dropped": [],
+  "image_coverage_pct": 55.201497395833336,
+  "distortion_monotonic_to_corners": true,
+  "square_mm": 35.0,
+  "date": "2026-11-23 20:24",
+  "sim_640x480": {
+    "fx": 545.2797468152232,
+    "fy": 545.4567457041771,
+    "cx": 320.1538827575579,
+    "cy": 254.5538820443492,
+    "fovy_deg": 47.498818590116905,
+    "principal_offset_px": [
+      0.15388275755788072,
+      14.553882044349194
+    ],
+    "note": "MuJoCo has no lens distortion: undistort real images with camera_matrix+distortion (scaled to the stream size) before comparing with sim renders"
+  }
+}

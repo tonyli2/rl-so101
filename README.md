@@ -2,8 +2,12 @@
 
 Control a simulated SO-101 follower with a calibrated real leader, then collect
 pick-and-place demonstrations for imitation learning. The mounted task uses one
-red cube, a black bin, and overhead/wrist cameras. Train ACT locally and evaluate
+red cube, a grey PLA bin, and overhead/wrist cameras. Train ACT locally and evaluate
 saved policies in the same mounted scene.
+
+**Before sim-to-real:** [verify real/sim camera agreement first](docs/sim2real.md).
+Wrist mounting position/tilt remain CAD estimates; applying measured intrinsics
+is not physical validation. This is a known open transfer-error source.
 
 ## Run
 
@@ -14,9 +18,9 @@ cd ~/code/enph576/lerobot-tabletop
 # Explore the scene; add --leader-port /dev/ttyACM0 for leader control.
 python launch_tabletop.py
 
-# Append to the existing local baseline (omit --resume for a new dataset).
-python record_demonstrations.py --root recordings/sim-baseline --resume \
-  --leader-port /dev/ttyACM0 --episodes 3
+# First collect one fixed-layout demonstration in the updated scene.
+python record_demonstrations.py --fixed-layout --root recordings/sim-bootstrap-1 \
+  --leader-port /dev/ttyACM0 --episodes 1
 ```
 
 The recorder opens one four-view window with buttons and keyboard controls:

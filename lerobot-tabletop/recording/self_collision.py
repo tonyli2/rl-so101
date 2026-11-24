@@ -1,10 +1,10 @@
-"""Detect unwanted robot self-contact while allowing manipulation contacts."""
+"""Check self-contact and recording obstacles; allow normal manipulation."""
 
 from .schema import JOINTS
 
 
 class SelfCollisionError(RuntimeError):
-    """A demonstration cannot start or be kept after robot self-contact."""
+    """A demonstration cannot start or be kept after prohibited robot contact."""
 
 
 class SelfCollisionChecker:
@@ -29,6 +29,15 @@ class SelfCollisionChecker:
             if ancestor == root:
                 self.robot_bodies.add(body)
 
+    def _contact_details(self, data, contact, geoms, bodies):
+        """Shared diagnostic fields for self-contact and recording obstacles."""
+        return {
+            "bodies": [self.model.body(body).name for body in bodies],
+            "geoms": [self.model.geom(g).name or f"geom_{g}" for g in geoms],
+            "penetration_m": float(max(0.0, -contact.dist)),
+            "sim_time": float(data.time),
+        }
+
     def check(self, data):
         for contact in data.contact:
             # Contacts within an optional positive margin are proximity, not a
@@ -45,14 +54,60 @@ class SelfCollisionChecker:
                 or int(self.model.body_parentid[b]) == a
             ):
                 continue
-            return {
-                "bodies": [self.model.body(body).name for body in bodies],
-                "geoms": [self.model.geom(g).name or f"geom_{g}" for g in geoms],
-                "penetration_m": float(max(0.0, -contact.dist)),
-                "sim_time": float(data.time),
-            }
+            return self._contact_details(data, contact, geoms, bodies)
         return None
 
 
 def collision_message(contact):
-    return "Self-collision: " + " touches ".join(contact["bodies"])
+    if contact.get("kind") == "curtain":
+        prefix = f"Curtain collision ({contact['curtain']}): "
+    elif contact.get("kind") == "upright":
+        prefix = "Upright collision: "
+    else:
+        prefix = "Self-collision: "
+    return prefix + " touches ".join(contact["bodies"])
+
+
+class RecordingCollisionChecker(SelfCollisionChecker):
+    """Recording gate for self-contact, upright contact, and paper curtains.
+
+    The historical self-only checker is unchanged. Task-object contacts and
+    the visual-only stand bases are not rejected by this gate.
+    """
+
+    def __init__(self, model):
+        super().__init__(model)
+        try:
+            self.upright_geom = model.geom("overhead_upright_collision").id
+        except KeyError:
+            self.upright_geom = None
+        self.curtain_geoms = {
+            gid: model.geom(gid).name.removeprefix("paper_curtain_")
+            for gid in range(model.ngeom)
+            if (model.geom(gid).name or "").startswith("paper_curtain_")
+        }
+        self.obstacle_geoms = set(self.curtain_geoms)
+        if self.upright_geom is not None:
+            self.obstacle_geoms.add(self.upright_geom)
+
+    def check(self, data):
+        self_contact = super().check(data)
+        if self_contact is not None or not self.obstacle_geoms:
+            return self_contact
+        for contact in data.contact:
+            if contact.dist > 0:
+                continue
+            geoms = list(map(int, contact.geom))
+            obstacles = self.obstacle_geoms.intersection(geoms)
+            if not obstacles:
+                continue
+            bodies = [int(self.model.geom_bodyid[g]) for g in geoms]
+            if not any(body in self.robot_bodies for body in bodies):
+                continue
+            obstacle = min(obstacles)
+            result = self._contact_details(data, contact, geoms, bodies)
+            result["kind"] = "curtain" if obstacle in self.curtain_geoms else "upright"
+            if obstacle in self.curtain_geoms:
+                result["curtain"] = self.curtain_geoms[obstacle]
+            return result
+        return None

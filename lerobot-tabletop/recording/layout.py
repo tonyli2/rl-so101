@@ -5,8 +5,9 @@ from pathlib import Path
 import mujoco
 import numpy as np
 from learning.reachability import find_reachability_witness, select_reference_pose
+from mounts.enclosure import update_paper_scene
 
-from .archive import load_episode_archive
+from .archive import load_episode_archive, restore_state
 from .self_collision import SelfCollisionChecker
 
 
@@ -36,16 +37,36 @@ class LayoutSampler:
         _, arrays, reference_model = load_episode_archive(Path(reference_root), 0)
         if reference_model.nq != model.nq or reference_model.nv != model.nv:
             raise ValueError("Reference dataset does not match collection model layout")
-        # Find demonstrated elevated approach/release seeds; IK uses the current model.
-        self.cube_reference = select_reference_pose(model, arrays["states"], self.cube0)
-        self.bin_reference = select_reference_pose(model, arrays["states"], self.bin0)
+        # Choose seeds in their original model, not the changed arm/base frame.
+        # Then translate demonstrated tool offsets to the current task positions.
+        reference_data = mujoco.MjData(reference_model)
+        restore_state(reference_model, reference_data, arrays["states"][0])
+        self.cube_reference = select_reference_pose(
+            reference_model,
+            arrays["states"],
+            reference_data.xpos[reference_model.body("red_cube").id],
+        )
+        self.bin_reference = select_reference_pose(
+            reference_model,
+            arrays["states"],
+            reference_data.xpos[reference_model.body("box").id],
+        )
+        for reference, current, name in (
+            (self.cube_reference, self.cube0, "red_cube"),
+            (self.bin_reference, self.bin0, "box"),
+        ):
+            reference["position"] = (
+                np.asarray(reference["position"])
+                + current
+                - reference_data.xpos[reference_model.body(name).id]
+            ).tolist()
         self.checker = SelfCollisionChecker(model)
         self.current = None
         self.renderer = mujoco.Renderer(world.model, height=height, width=width)
         self.renderer.enable_segmentation_rendering()
 
     def visible(self):
-        self.renderer.update_scene(self.world.data, camera="overhead")
+        update_paper_scene(self.renderer, self.world.model, self.world.data, "overhead")
         image = self.renderer.render()
         model = self.world.model
         geom_ids = np.flatnonzero(model.geom_bodyid == self.cube)

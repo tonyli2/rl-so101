@@ -33,8 +33,55 @@ def _absolute_assets(root, asset_directory):
         compiler.attrib.pop("texturedir", None)
 
 
+def _configure_task(scene, task):
+    """Apply the single-cube task materials, geometry and initial positions."""
+    asset = scene.find("asset")
+    # A small colour texture suggests print layers without extra physics geometry.
+    ET.SubElement(
+        asset,
+        "texture",
+        name="pla_layers",
+        type="cube",
+        file=str(UPSTREAM / "textures" / "pla_layers.png"),
+    )
+    plastic = dict(
+        texture="pla_layers",
+        texuniform="true",
+        specular="0.18",
+        shininess="0.25",
+        reflectance="0",
+    )
+    bin_material = asset.find("material[@name='box']")
+    bin_material.attrib.clear()
+    bin_material.attrib.update(name="box", rgba=_numbers(task["bin_rgba"]), **plastic)
+    ET.SubElement(
+        asset, "material", name="red_pla", rgba=_numbers(task["cube_rgba"]), **plastic
+    )
+    world = scene.find("worldbody")
+    # Single fixed-position task; the original upstream scene remains available.
+    for name in ("green_cube", "blue_cube", "yellow_cube"):
+        world.remove(world.find(f"body[@name='{name}']"))
+    cube = world.find("body[@name='red_cube']")
+    cube.set("pos", _numbers(task["cube_position"]))
+    cube.find("geom").set("material", "red_pla")
+    cube.find("geom").set("mass", str(task["cube_mass_kg"]))
+    bin_body = world.find("body[@name='box']")
+    bin_body.set("pos", _numbers(task["box_position"]))
+    # Butt the X-side walls against the Y-side walls instead of overlapping
+    # their top faces at the corners. Inner/outer dimensions stay 90/98 mm.
+    for wall in bin_body.findall("geom"):
+        x, y, _ = map(float, wall.get("pos").split())
+        if x != 0 and y == 0:
+            wall.set("size", "0.002 0.045 0.0175")
+    scene.find("./custom/text[@name='instruction']").set(
+        "data", "Put the red cube in the grey box."
+    )
+
+
 def build_variant():
     """Generate MJCF from untouched upstream XML and the editable mount poses."""
+    from .cameras import apply_intrinsics
+    from .enclosure import add_enclosure
     from .wrist import configure_wrist
 
     config = json.loads((HERE / "config.json").read_text())
@@ -49,19 +96,16 @@ def build_variant():
     ET.SubElement(
         asset, "material", **{**servo_material.attrib, "name": "printed_mount_black"}
     )
-    bin_material = asset.find("material[@name='box']")
-    bin_material.attrib.clear()
-    bin_material.attrib.update({**servo_material.attrib, "name": "box"})
-    world = scene.find("worldbody")
-    # Single fixed-position task; the original upstream scene remains available.
-    for name in ("green_cube", "blue_cube", "yellow_cube"):
-        world.remove(world.find(f"body[@name='{name}']"))
-    task = config["task"]
-    world.find("body[@name='red_cube']").set("pos", _numbers(task["cube_position"]))
-    world.find("body[@name='box']").set("pos", _numbers(task["box_position"]))
-    scene.find("./custom/text[@name='instruction']").set(
-        "data", "Put the red cube in the black box."
+    ET.SubElement(
+        asset,
+        "material",
+        name="paper",
+        rgba="0.96 0.96 0.96 1",
+        specular="0.02",
+        shininess="0.05",
     )
+    _configure_task(scene, config["task"])
+    world = scene.find("worldbody")
     stand = ET.SubElement(
         world, "body", name="overhead_stand", pos=_numbers(config["stand_position"])
     )
@@ -88,8 +132,23 @@ def build_variant():
             mass="0",
             group="2",
         )
-    camera = config["overhead_camera"]
+    # Only the straight upright is solid; printed feet/adapters remain visual-only.
+    upright = config["upright_collision"]
     ET.SubElement(
+        stand,
+        "geom",
+        name="overhead_upright_collision",
+        type="box",
+        pos=_numbers(upright["pos"]),
+        size=_numbers(upright["size"]),
+        contype="1",
+        conaffinity="1",
+        mass="0",
+        group="3",
+        rgba="1 0.5 0 0.3",
+    )
+    camera = config["overhead_camera"]
+    overhead_camera = ET.SubElement(
         stand,
         "camera",
         name="overhead",
@@ -98,7 +157,9 @@ def build_variant():
         xyaxes=_numbers(camera["xyaxes"]),
         fovy=str(camera["fovy"]),
     )
-    # The board's orientation follows the camera; visible geometry is not optical calibration.
+    if "intrinsics_640x480" in camera:
+        apply_intrinsics(overhead_camera, camera["intrinsics_640x480"])
+    # PCB/lens proxies remain nominal CAD geometry; measured optical pose is separate.
     ET.SubElement(
         stand,
         "geom",
@@ -125,6 +186,7 @@ def build_variant():
         conaffinity="0",
         mass="0",
     )
+    add_enclosure(scene, config)
     site = world.find("site[@name='so101_mount']")
     site.set("pos", _numbers(config["follower_position"]))
     site.set("quat", _numbers(config["follower_quaternion"]))
@@ -147,12 +209,22 @@ def build_variant():
     return GENERATED
 
 
+class MountedWorld(tabletop._World):
+    """Recorded cameras see opaque paper; model alpha stays inspection-friendly."""
+
+    def render(self, camera):
+        from .enclosure import update_paper_scene
+
+        update_paper_scene(self.renderer, self.model, self.data, camera)
+        return self.renderer.render().copy()
+
+
 class MountedSO101Env(tabletop.SO101Env):
     """Mounted single-cube task using upstream controls and rendering."""
 
     def _ensure_world(self):
         if self._world is None:
-            self._world = tabletop._World(
+            self._world = MountedWorld(
                 GENERATED / "scene.xml",
                 GENERATED,
                 self.fps,

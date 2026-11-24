@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import mujoco
 import numpy as np
+from mounts.enclosure import update_paper_scene
 
 VIEW_NAMES = ("Front", "Overhead / top", "Side", "Diagonal")
 CONTROLS = (
@@ -21,6 +22,7 @@ CONTROLS = (
 
 class MultiViewRenderer:
     def __init__(self, model, height=240, width=320):
+        self.model = model
         self.height, self.width = height, width
         self.renderer = mujoco.Renderer(model, height=height, width=width)
         self.cameras = {}
@@ -41,10 +43,14 @@ class MultiViewRenderer:
 
         images = {}
         for name, camera in self.cameras.items():
-            self.renderer.update_scene(world.data, camera=camera)
+            update_paper_scene(
+                self.renderer, self.model, world.data, camera, inspection=True
+            )
             images[name] = self.renderer.render().copy()
         # Move only the display scene's stereo cameras, never model camera poses.
-        self.renderer.update_scene(world.data, camera="overhead")
+        update_paper_scene(
+            self.renderer, self.model, world.data, "overhead", inspection=True
+        )
         for camera in self.renderer.scene.camera:
             camera.pos[2] -= 0.10
         overhead = Image.fromarray(self.renderer.render().copy())

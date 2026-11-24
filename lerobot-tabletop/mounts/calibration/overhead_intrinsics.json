@@ -1,0 +1,57 @@
+{
+  "name": "overhead",
+  "width": 640,
+  "height": 480,
+  "model": "opencv_plumb_bob5_k3_fixed_0",
+  "camera_matrix": [
+    [
+      549.7887372680832,
+      0.0,
+      334.5283557596535
+    ],
+    [
+      0.0,
+      550.0509286699471,
+      269.36042729667537
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "distortion": [
+    -0.4370435820907135,
+    0.19357732207759096,
+    -0.0008818532682778453,
+    -0.00012270994882800272,
+    0.0
+  ],
+  "fx": 549.7887372680832,
+  "fy": 550.0509286699471,
+  "cx": 334.5283557596535,
+  "cy": 269.36042729667537,
+  "fov_x_deg": 60.40238417814828,
+  "fov_y_deg": 47.14552312300622,
+  "rms_reprojection_px": 0.2950455303476655,
+  "views_used": 61,
+  "views_dropped": [
+    "058.png"
+  ],
+  "image_coverage_pct": 66.72298177083333,
+  "distortion_monotonic_to_corners": true,
+  "square_mm": 35.0,
+  "date": "2026-11-23 19:42",
+  "sim_640x480": {
+    "fx": 549.7887372680832,
+    "fy": 550.0509286699471,
+    "cx": 334.5283557596535,
+    "cy": 269.36042729667537,
+    "fovy_deg": 47.14552312300622,
+    "principal_offset_px": [
+      14.528355759653493,
+      29.36042729667537
+    ],
+    "note": "MuJoCo has no lens distortion: undistort real images with camera_matrix+distortion (scaled to the stream size) before comparing with sim renders"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "source_repository": "tonyli2/rl-so101",
+  "source_branch": "camera-calibration",
+  "source_commit": "0bb66e5c12d1cda55feff71389e3a3dace46478b",
+  "source_paths": [
+    "lerobot-tabletop/camera_calibration/results/overhead_intrinsics.json",
+    "lerobot-tabletop/camera_calibration/results/overhead_extrinsics.json",
+    "lerobot-tabletop/camera_calibration/results/wrist_intrinsics.json"
+  ],
+  "calibration_reference_follower_position": [
+    -0.0277045,
+    0.0,
+    0.0096
+  ],
+  "applied_follower_position": [
+    -0.0277045,
+    0.23206424184417723,
+    0.0096
+  ],
+  "calibration_world_to_current_world_translation_m": [
+    0.0,
+    0.23206424184417723,
+    0.0
+  ],
+  "overhead_camera_current_world_position_m": [
+    0.053548042319330774,
+    0.18606481344714787,
+    0.5355640142279104
+  ],
+  "overhead_position_storage": "stand-relative in config.overhead_camera.pos",
+  "undistortion_contract": "cv2.undistort(raw_640x480, K, D, None, K), independently per camera; no additional crop, mirror, rotation or resize",
+  "wrist_pose_status": "CAD estimate; not measured. Existing roll=0 retains gripper at bottom; confirm with paired real/sim frames.",
+  "validation_status": "Numerical projection checks are not physical sim2real sign-off; see docs/sim2real.md."
+}

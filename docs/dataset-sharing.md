@@ -57,8 +57,8 @@ The old-scene clean 50-demo baseline (25,666 frames) is now stored locally at
 `lerobot-tabletop/recordings/archive/sim-baseline/`. It predates the current arm
 placement, cameras, paper enclosure and measured object positions. It is for
 historical reproduction, not the current-scene training dataset. The randomized
-recorder still uses episode 0 only as an IK seed, interpreted in its original
-scene; that does not incorporate old demonstrations into new recordings.
+recorder now defaults to a new-scene bootstrap dataset for IK seeds; it no longer
+depends on the historical baseline. See [collection.md](collection.md).
 
 The existing [sim-baseline-clean-50-v1 release](https://github.com/tonyli2/rl-so101/releases/tag/sim-baseline-clean-50-v1)
 remains a historical snapshot. Its archive SHA256 is

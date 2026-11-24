@@ -22,7 +22,11 @@ from .schema import (
     create_dataset,
     learning_frame,
 )
-from .self_collision import SelfCollisionChecker, SelfCollisionError, collision_message
+from .self_collision import (
+    RecordingCollisionChecker,
+    SelfCollisionError,
+    collision_message,
+)
 
 
 class RecordingSession:
@@ -136,7 +140,7 @@ class RecordingSession:
 
     def _checker(self):
         if self._collision_checker is None:
-            self._collision_checker = SelfCollisionChecker(self.world.model)
+            self._collision_checker = RecordingCollisionChecker(self.world.model)
         return self._collision_checker
 
     def begin(self):
@@ -210,7 +214,8 @@ class RecordingSession:
                 "Recording discarded: %s. Move clear or reset, then start again.",
                 self.rejection_reason,
             )
-            info["recording_rejected_self_collision"] = contact
+            if contact.get("kind") not in ("upright", "curtain"):
+                info["recording_rejected_self_collision"] = contact
         if self.active:
             try:
                 action, controls = applied_action(self.world)
@@ -292,6 +297,18 @@ class RecordingSession:
                 "simulation_and_writer_overrun",
             ],
             "policy_eligible": self.source == "real_leader" and outcome == "success",
+            "upright_collision_check": {
+                "version": 1,
+                "enabled": self._checker().upright_geom is not None,
+                "passed": self._checker().upright_geom is not None,
+                "physics_substeps": True,
+            },
+            "curtain_collision_check": {
+                "version": 1,
+                "enabled": bool(self._checker().curtain_geoms),
+                "passed": bool(self._checker().curtain_geoms),
+                "physics_substeps": True,
+            },
             "self_collision_check": {
                 "version": 1,
                 "passed": True,

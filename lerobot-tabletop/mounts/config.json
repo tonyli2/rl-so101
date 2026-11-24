@@ -2,13 +2,17 @@
   "_notes": [
     "Geometry assembly from stock mesh mating features; nominal camera and base poses require visual confirmation.",
     "World +X is forward into workspace, +Z up. Front observer at +X looking -X: left is -Y.",
-    "No lens calibration yet: keep 640x480,30Hz, old vertical FOV60/61; mount mesh visual only.",
+    "Measured 640x480 camera intrinsics and overhead pose applied from camera-calibration; wrist pose remains CAD-derived and requires sim2real validation.",
     "Follower origin offset accounts for base visual footprint centre x=.021135 and bottom z=-.0024.",
-    "Corrected left adapter registration: Rx90 matches robot footprint; tab-root Z=-122.95004 mates stand Z=83.02499, insertion 10mm. Stand moved alongside fixed follower."
+    "Adapter registration retained by translating the follower from the front-view left adapter to the front-view right adapter; orientation unchanged."
   ],
   "task": {
-    "cube_position": [0.23, 0.0, 0.015],
-    "box_position": [0.22, 0.125, 0.0]
+    "_position_note": "Measured axis-aligned nearest corners in pole-front tabletop frame: bin outside near-left (0.024, 0.20), cube near-right (-0.07, 0.26) metres. Centres: bin (0.073, 0.249), cube (-0.085, 0.275); converted to world coordinates below.",
+    "cube_position": [0.2550305, 0.20103212, 0.015],
+    "box_position": [0.2290305, 0.04303212, 0.0],
+    "cube_mass_kg": 0.01021,
+    "cube_rgba": [0.95, 0.15, 0.12, 1.0],
+    "bin_rgba": [0.5, 0.5, 0.5, 1.0]
   },
   "stand_position": [
     -0.0326695,
@@ -94,7 +98,7 @@
   ],
   "follower_position": [
     -0.0277045,
-    0.0,
+    0.23206424184417723,
     0.0096
   ],
   "follower_quaternion": [
@@ -103,21 +107,34 @@
     0,
     0
   ],
+  "paper_enclosure": {
+    "_note": "Metres in tabletop measurement frame: origin at upright front face centre; +X toward overhead image right (world -Y), +Y forward (world +X), +Z up. Curtain coordinates are interior faces.",
+    "left_x": -0.53,
+    "right_x": 0.53,
+    "front_y": 0.455,
+    "height": 0.41,
+    "thickness": 0.002
+  },
+  "upright_collision": {
+    "_note": "One box matching the STL straight upright: 25.4 x 36.625 mm cross-section, z=8.7..511.3 mm above table. Excludes flat bases and angled camera head.",
+    "pos": [0.0, 0.0, 0.26],
+    "size": [0.0127, 0.0183125, 0.2513]
+  },
   "overhead_camera": {
     "pos": [
-      0.033120690273436046,
-      0.0,
-      0.5438884736915043
+      0.08621754231933076,
+      0.07003269344714787,
+      0.5355640142279104
     ],
     "xyaxes": [
-      0.0,
-      -1.0,
-      0.0,
-      0.9111526308495718,
-      0.0,
-      0.4120690273436043
+      -0.048140052372507354,
+      -0.9988034506746737,
+      0.008614074409772635,
+      0.9088183904508754,
+      -0.040221710380545346,
+      0.41524853665286293
     ],
-    "fovy": 60,
+    "fovy": 47.14552312300622,
     "pcb_pos": [
       0.029,
       0.0,
@@ -133,7 +150,65 @@
       0.031060345136718022,
       0.0,
       0.5484442368457522
-    ]
+    ],
+    "intrinsics_640x480": {
+      "name": "overhead",
+      "width": 640,
+      "height": 480,
+      "model": "opencv_plumb_bob5_k3_fixed_0",
+      "camera_matrix": [
+        [
+          549.7887372680832,
+          0.0,
+          334.5283557596535
+        ],
+        [
+          0.0,
+          550.0509286699471,
+          269.36042729667537
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "distortion": [
+        -0.4370435820907135,
+        0.19357732207759096,
+        -0.0008818532682778453,
+        -0.00012270994882800272,
+        0.0
+      ],
+      "fx": 549.7887372680832,
+      "fy": 550.0509286699471,
+      "cx": 334.5283557596535,
+      "cy": 269.36042729667537,
+      "fov_x_deg": 60.40238417814828,
+      "fov_y_deg": 47.14552312300622,
+      "rms_reprojection_px": 0.2950455303476655,
+      "views_used": 61,
+      "views_dropped": [
+        "058.png"
+      ],
+      "image_coverage_pct": 66.72298177083333,
+      "distortion_monotonic_to_corners": true,
+      "square_mm": 35.0,
+      "date": "2026-11-23 19:42",
+      "sim_640x480": {
+        "fx": 549.7887372680832,
+        "fy": 550.0509286699471,
+        "cx": 334.5283557596535,
+        "cy": 269.36042729667537,
+        "fovy_deg": 47.14552312300622,
+        "principal_offset_px": [
+          14.528355759653493,
+          29.36042729667537
+        ],
+        "note": "MuJoCo has no lens distortion: undistort real images with camera_matrix+distortion (scaled to the stream size) before comparing with sim renders"
+      }
+    },
+    "_note": "Active measured pinhole optics. pos is stand-relative after converting the calibration arm-reference world to the current follower position. PCB/lens visual proxies remain nominal CAD geometry; see docs/sim2real.md."
   },
   "wrist": {
     "mesh_pos": [
@@ -153,9 +228,65 @@
       0.0175
     ],
     "camera_roll_degrees": 0,
-    "fovy": 61,
+    "fovy": 47.498818590116905,
     "mount_mass": 0.012,
     "camera_mass": 0.005,
-    "camera_plate_side": -1.0
+    "camera_plate_side": -1.0,
+    "intrinsics_640x480": {
+      "name": "wrist",
+      "width": 640,
+      "height": 480,
+      "model": "opencv_plumb_bob5_k3_fixed_0",
+      "camera_matrix": [
+        [
+          545.2797468152232,
+          0.0,
+          320.1538827575579
+        ],
+        [
+          0.0,
+          545.4567457041771,
+          254.5538820443492
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "distortion": [
+        -0.43508348211147796,
+        0.19229427305764474,
+        -0.0005986085186731004,
+        0.002976485261916446,
+        0.0
+      ],
+      "fx": 545.2797468152232,
+      "fy": 545.4567457041771,
+      "cx": 320.1538827575579,
+      "cy": 254.5538820443492,
+      "fov_x_deg": 60.813486788141375,
+      "fov_y_deg": 47.498818590116905,
+      "rms_reprojection_px": 0.2529917660622391,
+      "views_used": 40,
+      "views_dropped": [],
+      "image_coverage_pct": 55.201497395833336,
+      "distortion_monotonic_to_corners": true,
+      "square_mm": 35.0,
+      "date": "2026-11-23 20:24",
+      "sim_640x480": {
+        "fx": 545.2797468152232,
+        "fy": 545.4567457041771,
+        "cx": 320.1538827575579,
+        "cy": 254.5538820443492,
+        "fovy_deg": 47.498818590116905,
+        "principal_offset_px": [
+          0.15388275755788072,
+          14.553882044349194
+        ],
+        "note": "MuJoCo has no lens distortion: undistort real images with camera_matrix+distortion (scaled to the stream size) before comparing with sim renders"
+      }
+    },
+    "_note": "Measured intrinsics; CAD-derived lens position/tilt remain unverified. Expected raw-image orientation: gripper tongs at bottom. Roll 0 already projects gripperframe into lower half; verify against real frames before sim2real."
   }
 }

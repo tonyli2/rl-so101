@@ -47,16 +47,22 @@ def main():
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument(
+    layout_options = parser.add_mutually_exclusive_group()
+    layout_options.add_argument(
         "--fixed-layout",
         action="store_true",
-        help="Disable cube/bin randomization (legacy baseline or tests)",
+        help="Keep measured cube/bin positions (default)",
+    )
+    layout_options.add_argument(
+        "--randomize-layout",
+        action="store_true",
+        help="Randomize cube/bin positions using --layout-reference",
     )
     parser.add_argument(
         "--layout-reference",
         type=Path,
-        default=Path(__file__).parent / "recordings/archive/sim-baseline",
-        help="Historical demonstration dataset used only for approach/release IK seeds",
+        default=Path(__file__).parent / "recordings/sim-bootstrap-1",
+        help="Fixed-layout bootstrap dataset providing approach/release IK seeds",
     )
     parser.add_argument(
         "--headless", action="store_true", help="Offscreen cameras, no MuJoCo window"
@@ -137,7 +143,7 @@ def main():
         terminate_on_success=False,
         episode_length=args.steps + int(args.settle_seconds * args.fps) + 2,
     )
-    randomized = not args.fixed_layout and not args.synthetic
+    randomized = args.randomize_layout and not args.synthetic
     if args.resume:
         import json
 
@@ -266,6 +272,7 @@ def main():
                 show_left_ui=False,
                 show_right_ui=False,
             )
+            viewer.opt.geomgroup[5] = 1
             viewer.cam.lookat[:] = [0.08, 0.04, 0.24]
             viewer.cam.distance, viewer.cam.azimuth, viewer.cam.elevation = (
                 1.25,

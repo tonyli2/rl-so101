@@ -83,7 +83,7 @@ class LayoutTests(unittest.TestCase):
         item = sampler()
         item.width = item.height = 32
         image = np.full((32, 32, 2), -1, dtype=np.int32)
-        item.renderer = Mock()
+        item.renderer = Mock(scene=SimpleNamespace(geoms=[], ngeom=0))
         item.renderer.render.return_value = image
         self.assertFalse(item.visible())
         cube_geom = np.flatnonzero(item.world.model.geom_bodyid == item.cube)[0]
