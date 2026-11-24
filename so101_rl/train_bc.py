@@ -249,13 +249,18 @@ def start_poses(demos: Demos, world, episodes: set[int], noise_deg: float = 0.0,
     return out
 
 
-def rollout_parallel(model: PPO, starts: list[np.ndarray], n_envs: int = 8, episode_steps: int = 900) -> dict:
-    """Closed-loop episodes from the given start joints, ``n_envs`` at a time in subprocesses."""
+def rollout_parallel(model: PPO, starts: list[np.ndarray], n_envs: int = 8, episode_steps: int = 900,
+                     fixed_factors: dict | None = None) -> dict:
+    """Closed-loop episodes from the given start joints, ``n_envs`` at a time in subprocesses
+    (optionally under fixed randomization factors, e.g. ``{"actuator": {"latency_steps": 2}}``)."""
     from functools import partial
 
     from stable_baselines3.common.vec_env import SubprocVecEnv
 
-    venv = SubprocVecEnv([partial(So101PickPlaceEnv, **env_kwargs(episode_steps=episode_steps))] * n_envs)
+    kwargs = env_kwargs(episode_steps=episode_steps)
+    if fixed_factors is not None:
+        kwargs["fixed_factors"] = fixed_factors
+    venv = SubprocVecEnv([partial(So101PickPlaceEnv, **kwargs)] * n_envs)
     results = []
     try:
         for c in range(0, len(starts), n_envs):

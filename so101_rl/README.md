@@ -121,6 +121,31 @@ field of view +-2.2 deg. All four together at the caps: 19% lifted (factors comp
 With these, `main_randomized_cal_s1` reached 95% at 300k and 100% at 400k on the nominal
 evaluation while training under full (calibrated) randomization.
 
+### Actuator factors and control latency
+
+`factor_sweep.py` also tests servo strength (`torque_scale`), stiffness (`kp_scale`) and control
+latency (`latency_steps`: commands take effect N 33 ms control steps late). Torque x0.5 and
+stiffness x0.5/x1.5 barely matter (94-98% for the 500k PPO policies). Latency does: 90-94% at 1
+step, then 0-1% at 2 steps. The real arm measures ~76-110 ms (camera 26 ms + frame age 0-33 ms +
+servo dead time ~50 ms), i.e. 2.3-3.3 steps, so this sweep setting matches the real robot.
+
+The cause is the action base. Relative actions add the policy's motion to the *measured* joints,
+and under latency those are stale, so the arm chases old positions. Basing the motion on the
+*previous command* instead (`envs relative_base = "command"`, `factor_sweep.py --relative-base
+command`) fixes it with no retraining (`outputs/sweeps/step500000_cmdbase`, 40 episodes per cell):
+
+| setting | nominal PPO, measured base | nominal PPO, command base | randomized PPO, measured base | randomized PPO, command base |
+|---|---|---|---|---|
+| nominal | 97% | 96% | 99% | 97% |
+| latency 2 steps | 1% | 94% | 0% | 97% |
+| latency 3 steps (measured real) | - | 95% | - | 97% |
+| friction 0.30 | 74% | 85% | 97% | 93% |
+| combined_moderate | 71% | 63% | 89% | 96% |
+
+Training with latency randomized over 0-3 steps (`train_ppo.py --randomize ... actuator`) did not
+help with the measured base: 0% at 2 and 3 steps after 200k steps (pilot stopped). Deploy with the
+command base.
+
 ## Run
 
 ```powershell

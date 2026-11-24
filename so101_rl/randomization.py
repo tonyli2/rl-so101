@@ -75,10 +75,14 @@ class Ranges:
     camera_rot_deg: float = 3.0         # +- about each axis
     camera_fovy_deg: float = 3.0        # +- vertical field of view
     friction: tuple = (0.4, 1.2)        # object-finger sliding friction
+    # Control latency in 33 ms control steps, sampled uniformly from 0..this. Measured on the real
+    # arm: camera ~26 ms + frame age 0-33 ms + servo dead time ~40-50 ms = ~76-110 ms (2.3-3.3 steps).
+    latency_steps: int = 3
     # Per-factor cap on strength (0-1), from the calibration pilot (calibrate_ranges.py): each
     # factor's ranges are scaled by curriculum strength x its cap.
     factor_strength: dict = field(default_factory=lambda: {"texture": 1.0, "lighting": 1.0,
-                                                           "camera": 1.0, "friction": 1.0})
+                                                           "camera": 1.0, "friction": 1.0,
+                                                           "actuator": 1.0})
 
 
 class Randomizer:
@@ -104,6 +108,11 @@ class Randomizer:
         self.mat_texrepeat0 = {s: m.mat_texrepeat[i].copy() for s, i in self.surface_mats.items()}
         self.tex_ids = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_TEXTURE, t[0]) for t in TEXTURES]
         self.friction0 = world.nominal_friction
+        # Actuators (position servos: force = kp * (target - q) - kv * qdot, clipped to forcerange)
+        self.act = world.act
+        self.gain0 = m.actuator_gainprm[self.act].copy()
+        self.bias0 = m.actuator_biasprm[self.act].copy()
+        self.forcerange0 = m.actuator_forcerange[self.act].copy()
 
     # --- sampling -----------------------------------------------------------------------------
     def sample(self, rng: np.random.Generator, ranges: Ranges, factors=("texture", "lighting", "camera", "friction"),
@@ -112,7 +121,8 @@ class Randomizer:
         0 = nominal, 1 = the full ranges. Textures: each surface keeps its nominal look with
         probability 1 - strength."""
         base = float(np.clip(strength, 0.0, 1.0))
-        cap = {"texture": 1.0, "lighting": 1.0, "camera": 1.0, "friction": 1.0, **ranges.factor_strength}
+        cap = {"texture": 1.0, "lighting": 1.0, "camera": 1.0, "friction": 1.0, "actuator": 1.0,
+               **ranges.factor_strength}
         p: dict = {}
         n_lights = len(self.light_dir0)
         s = base * cap["texture"]
@@ -137,6 +147,9 @@ class Randomizer:
         toward = lambda nominal, lo, hi: (nominal + s * (lo - nominal), nominal + s * (hi - nominal))  # noqa: E731
         if "friction" in factors:
             p["friction"] = float(rng.uniform(*toward(self.friction0, *ranges.friction)))
+        s = base * cap["actuator"]
+        if "actuator" in factors:  # latency only (servo gain/torque changes barely mattered in the sweep)
+            p["actuator"] = {"latency_steps": int(rng.integers(0, round(s * ranges.latency_steps) + 1))}
         return p
 
     # --- applying -----------------------------------------------------------------------------
@@ -150,6 +163,9 @@ class Randomizer:
             m.mat_rgba[i], m.mat_texid[i] = self.mat_rgba0[s], self.mat_texid0[s]
             m.mat_texrepeat[i] = self.mat_texrepeat0[s]
         self.world.set_object_friction(self.friction0)
+        m.actuator_gainprm[self.act] = self.gain0
+        m.actuator_biasprm[self.act] = self.bias0
+        m.actuator_forcerange[self.act] = self.forcerange0
 
     def apply(self, p: dict) -> None:
         """Set factors in ``p`` (as produced by ``sample``); everything else returns to nominal."""
@@ -184,3 +200,10 @@ class Randomizer:
             m.cam_fovy[self.camera] = self.cam_fovy0 + c["fovy_deg"]
         if "friction" in p:
             self.world.set_object_friction(p["friction"])
+        if "actuator" in p:  # servo dynamics (latency is applied by the env, see actuator_latency)
+            a = p["actuator"]
+            kp, kv = a.get("kp_scale", 1.0), a.get("kv_scale", a.get("kp_scale", 1.0))
+            m.actuator_gainprm[self.act, 0] = self.gain0[:, 0] * kp
+            m.actuator_biasprm[self.act, 1] = self.bias0[:, 1] * kp
+            m.actuator_biasprm[self.act, 2] = self.bias0[:, 2] * kv
+            m.actuator_forcerange[self.act] = self.forcerange0 * a.get("torque_scale", 1.0)

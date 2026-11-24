@@ -359,6 +359,13 @@ class _So101TaskEnv(gym.Env):
         self.home = self.world.deg_to_ctrl(HOME_DEG)
         self._steps = 0
         self._target_ctrl = self.home.copy()
+        # Control latency (evaluation factor "actuator"): commands take effect this many steps late.
+        self.action_latency = 0
+        # Base of "relative" actions: "measured" joints (as trained) or the previous "command".
+        # Under latency the measured joints are stale; the previous command is not.
+        self.relative_base = "measured"
+        self._pending: deque = deque()
+        self._held = self.home.copy()
         self._frames: deque = deque(maxlen=history)
         self._wrist_frames: deque = deque(maxlen=history)
         self._states: deque = deque(maxlen=history)
@@ -429,6 +436,8 @@ class _So101TaskEnv(gym.Env):
         q = np.clip(q, self.world.lo, self.world.hi)
         self.world.reset(q)
         self._target_ctrl = q.copy()
+        self._pending.clear()
+        self._held = q.copy()
         self._steps = 0
         self._reset_task()
         mujoco.mj_forward(self.world.model, self.world.data)
@@ -441,10 +450,16 @@ class _So101TaskEnv(gym.Env):
             self._target_ctrl = np.clip(self._target_ctrl + a * self.delta_scale, w.lo, w.hi)
         elif self.action_mode == "relative":
             # Motion from where the arm is now (measured), not from the last command.
-            self._target_ctrl = np.clip(w.qpos + a * self.relative_scale, w.lo, w.hi)
+            base = w.qpos if self.relative_base == "measured" else self._target_ctrl
+            self._target_ctrl = np.clip(base + a * self.relative_scale, w.lo, w.hi)
         else:
             self._target_ctrl = w.lo + (a + 1) / 2 * (w.hi - w.lo)
-        w.step(self._target_ctrl)
+        applied = self._target_ctrl
+        if self.action_latency:
+            self._pending.append(self._target_ctrl.copy())
+            applied = self._pending.popleft() if len(self._pending) > self.action_latency else self._held
+        self._held = applied
+        w.step(applied)
 
     def step(self, action):
         self._apply_action(action)
@@ -588,6 +603,7 @@ class So101PickPlaceEnv(_So101TaskEnv):
             self.last_factors = self._randomizer.sample(self.np_random, ranges, factors,
                                                         strength=getattr(self, "randomize_strength", 1.0))
         self._randomizer.apply(self.last_factors)
+        self.action_latency = int(self.last_factors.get("actuator", {}).get("latency_steps", 0))
 
     def _reset_task(self) -> None:
         self._apply_randomization()

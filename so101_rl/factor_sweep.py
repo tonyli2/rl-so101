@@ -90,6 +90,17 @@ SETTINGS: dict[str, tuple[str, str, dict]] = {
     "friction_0.45": ("friction", "strong", {"friction": 0.45}),
     "friction_0.30": ("friction", "strong", {"friction": 0.30}),
     "friction_0.20": ("friction", "extreme", {"friction": 0.20}),
+    # Actuator dynamics (added 2026-11-23 at the user's request; evaluation only - no policy was
+    # trained with it). Torque 0.7: the 7.4 V STS3215 gives ~65% of the 12 V torque the model uses.
+    "actuator_torque_0.7": ("actuator", "moderate", {"actuator": {"torque_scale": 0.7}}),
+    "actuator_torque_0.5": ("actuator", "strong", {"actuator": {"torque_scale": 0.5}}),
+    "actuator_stiffness_0.5": ("actuator", "strong", {"actuator": {"kp_scale": 0.5}}),
+    "actuator_stiffness_1.5": ("actuator", "strong", {"actuator": {"kp_scale": 1.5}}),
+    "actuator_latency_1": ("actuator", "moderate", {"actuator": {"latency_steps": 1}}),
+    "actuator_latency_2": ("actuator", "strong", {"actuator": {"latency_steps": 2}}),
+    "actuator_latency_3": ("actuator", "measured", {"actuator": {"latency_steps": 3}}),  # real arm ~2.3-3.3
+    "actuator_combined": ("actuator", "combined", {"actuator": {"torque_scale": 0.7, "kp_scale": 0.7,
+                                                                "latency_steps": 1}}),
     "combined_moderate": ("combined", "moderate", {
         "texture": texture(R.TRAIN_TEXTURES[0]), "lighting": lighting(0.9, 0.17, 5.0),
         "camera": camera(0.008, 1.5, 1.5), "friction": 0.70}),
@@ -169,6 +180,9 @@ def main() -> None:
     parser.add_argument("--policies", nargs="+", help="subset of policies (bc, main_nominal_s1, ...)")
     parser.add_argument("--n-envs", type=int, default=8)
     parser.add_argument("--episodes", type=int, help="use only the first N of the 40 starts (smoke tests)")
+    parser.add_argument("--relative-base", choices=("measured", "command"), default="measured",
+                        help="base of relative actions at test time: measured joints (as trained) or the "
+                             "previous command (robust to control latency)")
     args = parser.parse_args()
 
     prepare_mounted(rebuild=True)
@@ -191,11 +205,14 @@ def main() -> None:
     results_path = out / "results.jsonl"
     rows = [json.loads(line) for line in results_path.read_text().splitlines()] if results_path.is_file() else []
     done = {(r["policy"], r["setting"]) for r in rows}
-    (out / "config.json").write_text(json.dumps({
-        "step": args.step, "episodes_per_cell": len(starts),
-        "policies": {k: [c, s, str(p)] for k, (c, s, p) in pols.items()},
-        "settings": {k: {"factor": f, "level": lv, "fixed_factors": fx} for k, (f, lv, fx) in settings.items()},
-    }, indent=2))
+    cfg_path = out / "config.json"  # merged across runs into the same folder (e.g. added settings)
+    cfg = json.loads(cfg_path.read_text()) if cfg_path.is_file() else {"settings": {}, "policies": {}}
+    if cfg_path.is_file() and cfg.get("relative_base", "measured") != args.relative_base:
+        sys.exit(f"{out} holds results for relative_base={cfg.get('relative_base', 'measured')}; use --name")
+    cfg.update(step=args.step, episodes_per_cell=len(starts), relative_base=args.relative_base)
+    cfg["policies"].update({k: [c, s, str(p)] for k, (c, s, p) in pols.items()})
+    cfg["settings"].update({k: {"factor": f, "level": lv, "fixed_factors": fx} for k, (f, lv, fx) in settings.items()})
+    cfg_path.write_text(json.dumps(cfg, indent=2))
     print(f"{len(pols)} policies x {len(settings)} settings x {len(starts)} episodes -> {out}", flush=True)
 
     models = {name: PPO.load(path, device=device) for name, (_, _, path) in pols.items()}
@@ -206,6 +223,7 @@ def main() -> None:
             continue
         kw = train_bc.env_kwargs(fixed_factors=fixed) if fixed else train_bc.env_kwargs()
         venv = SubprocVecEnv([partial(So101PickPlaceEnv, **kw)] * args.n_envs)
+        venv.set_attr("relative_base", args.relative_base)
         try:
             for p in todo:
                 cond, seed, _ = pols[p]

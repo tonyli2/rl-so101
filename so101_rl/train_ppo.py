@@ -118,9 +118,13 @@ class CurriculumCallback(BaseCallback):
 class EvalCallback(BaseCallback):
     """Deterministic closed-loop evaluation every ``every`` steps; saves each evaluated model."""
 
-    def __init__(self, starts: dict, run: Path, every: int, history: list, writer_dir: Path):
+    def __init__(self, starts: dict, run: Path, every: int, history: list, writer_dir: Path,
+                 stress: dict | None = None):
         super().__init__()
         self.starts, self.run, self.every, self.history = starts, run, every, history
+        # Extra groups under fixed factors (name -> (starts, factors)), reported separately so the
+        # headline nominal numbers stay comparable across runs.
+        self.stress = stress or {}
         self.next_eval = every
         from torch.utils.tensorboard import SummaryWriter
 
@@ -134,14 +138,19 @@ class EvalCallback(BaseCallback):
         row = {"step": step, **{m: sum(g[m] * g["episodes"] for g in groups.values()) / n
                                 for m in ("success_rate", "lifted_rate", "in_box_rate")},
                "groups": {k: {m: g[m] for m in ("success_rate", "lifted_rate")} for k, g in groups.items()}}
+        for name, (starts, factors) in self.stress.items():
+            g = train_bc.rollout_parallel(self.model, starts, fixed_factors=factors)
+            row.setdefault("stress", {})[name] = {m: g[m] for m in ("success_rate", "lifted_rate")}
+            self.writer.add_scalar(f"stress/{name}_success_rate", g["success_rate"], step)
         self.history.append(row)
         for m in ("success_rate", "lifted_rate", "in_box_rate"):
             self.writer.add_scalar(f"eval/{m}", row[m], step)
         self.writer.flush()
         (self.run / "eval_history.json").write_text(json.dumps(self.history, indent=2))
         self.model.save(self.run / f"model_{step}.zip")
+        stress = "".join(f"  | {k} {v['success_rate']:.0%}" for k, v in row.get("stress", {}).items())
         print(f"[eval @ {step:>8d}] success {row['success_rate']:.1%}  lifted {row['lifted_rate']:.1%}  "
-              f"in box {row['in_box_rate']:.1%}  ({n} episodes)", flush=True)
+              f"in box {row['in_box_rate']:.1%}  ({n} episodes){stress}", flush=True)
         return row
 
     def _on_step(self) -> bool:
@@ -179,7 +188,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--quick-eval", action="store_true", help="evaluate on the 5 validation starts only (smoke tests)")
     parser.add_argument("--randomize", nargs="*", metavar="FACTOR",
-                        choices=("texture", "lighting", "camera", "friction"),
+                        choices=("texture", "lighting", "camera", "friction", "actuator"),
                         help="randomized condition: resample these factors every training episode "
                              "(no names = all four). Evaluation stays nominal; sweeps are separate.")
     parser.add_argument("--randomize-ranges", type=Path, default=HERE / "randomization_ranges.json",
@@ -188,6 +197,8 @@ def main() -> None:
     parser.add_argument("--randomize-curriculum", type=float, default=0.6,
                         help="randomization strength ramps from 0 after the warm-up to full ranges at this "
                              "fraction of --steps (0 = full strength from the start)")
+    parser.add_argument("--eval-latency", type=int, nargs="*", default=[], metavar="STEPS",
+                        help="also evaluate the 20 val starts under these fixed control latencies")
     parser.add_argument("--train-encoder", action="store_true",
                         help="also fine-tune the encoder heads (shared with the new critic, whose early "
                              "gradients can disturb the actor's features); default keeps them at BC")
@@ -242,7 +253,9 @@ def main() -> None:
         print(f"action std reset to {args.init_std}")
 
     history: list = []
-    eval_cb = EvalCallback(evals, run, args.eval_every, history, OUT / "tb" / f"{args.run_name}_eval")
+    stress = {f"latency{k}": (evals["val_exact"] + evals.get("val_jitter3deg", []), {"actuator": {"latency_steps": k}})
+              for k in args.eval_latency}
+    eval_cb = EvalCallback(evals, run, args.eval_every, history, OUT / "tb" / f"{args.run_name}_eval", stress)
     eval_cb.init_callback(model)
     eval_cb.evaluate(0)  # the BC policy itself, same episodes: the bar PPO has to clear
     callback = eval_cb
