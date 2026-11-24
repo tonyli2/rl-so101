@@ -46,14 +46,18 @@ OUT = HERE / "outputs" / "bc"
 VAL_EPISODES = set(range(45, 50))
 # Observation/action settings of the current run; saved as bc_config.json next to each model so
 # --eval and --view rebuild the same env. Runs without that file (or keys) used these defaults.
-OBS = {"history": 3, "velocities": True, "action": "absolute", "relative_scale": None, "trim_idle": False}
+OBS = {"history": 3, "velocities": True, "action": "absolute", "relative_scale": None, "trim_idle": False,
+       "relative_base": "measured", "resync": None}
 IDLE_DEG = 1.0  # leading frames whose command is within this of the measured arm count as idle
 
 
 def configure(history: int = 3, velocities: bool = True, action: str = "absolute",
-              relative_scale: list | None = None, trim_idle: bool = False) -> None:
-    OBS.update(history=history, velocities=velocities, action=action,
-               relative_scale=relative_scale, trim_idle=trim_idle)
+              relative_scale: list | None = None, trim_idle: bool = False,
+              relative_base: str = "measured", resync: dict | None = None) -> None:
+    """``relative_base``/``resync``: how relative actions become targets (action_mapping.py).
+    Configs saved before these existed load as "measured", what those runs trained with."""
+    OBS.update(history=history, velocities=velocities, action=action, relative_scale=relative_scale,
+               trim_idle=trim_idle, relative_base=relative_base, resync=resync)
 
 
 def load_config(model_path: Path) -> None:
@@ -68,6 +72,8 @@ def env_kwargs(**extra) -> dict:
               "include_targets": False, "wrist": True, "include_velocities": OBS["velocities"]}
     if OBS["action"] == "relative":
         kwargs["relative_scale"] = OBS["relative_scale"]
+        kwargs["relative_base"] = OBS["relative_base"]
+        kwargs["resync"] = OBS["resync"]
     return {**kwargs, **extra}
 
 

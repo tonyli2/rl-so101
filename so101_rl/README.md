@@ -171,6 +171,17 @@ Arm joints never re-synced (no false triggers). Full sweep with the resync base
 91% / 97%, combined_moderate 70% / 95%, i.e. the same as the command base and the measured base
 without latency.
 
+**Making sure deployment uses resync.** The mapping lives in one place, `action_mapping.py`
+(`ActionMapper`), used by the sim env and meant for the hardware runner, so both apply the same
+rule. The base is part of the run config (`bc_config.json` `obs.relative_base` / `obs.resync`):
+`train_bc.env_kwargs()` passes it to the env, and configs saved before it existed load as
+`"measured"` (what those runs trained with). Deploy through `deploy.load_policy(bundle)`: it
+requires the bundle's `bc_config.json` and refuses any relative-action policy whose base is not
+`"resync"`. `python deploy.py <bundle> --latency 3` runs a sim check of a bundle.
+`outputs/deploy/ppo_randomized_s1_500k` is `main_randomized_cal_s1` at 500k with a resync config
+(8/8 at 3-step latency). The refactor is exact: targets identical to the previous inline code
+(0 rad difference, all three bases, latency 0 and 3).
+
 ## Run
 
 ```powershell

@@ -35,6 +35,7 @@ import numpy as np
 from gymnasium import spaces
 
 import randomization
+from action_mapping import ActionMapper
 
 HERE = Path(__file__).absolute().parent
 TABLETOP = HERE.parent / "lerobot-tabletop"
@@ -327,6 +328,8 @@ class _So101TaskEnv(gym.Env):
         wrist: bool = False,
         include_velocities: bool = True,
         relative_scale=None,
+        relative_base: str = "measured",
+        resync: dict | None = None,
     ):
         super().__init__()
         # "relative" actions: target = measured joints + action * relative_scale (radians per joint).
@@ -361,26 +364,11 @@ class _So101TaskEnv(gym.Env):
         self._target_ctrl = self.home.copy()
         # Control latency (evaluation factor "actuator"): commands take effect this many steps late.
         self.action_latency = 0
-        # Base of "relative" actions: "measured" joints (as trained) or the previous "command".
-        # Under latency the measured joints are stale; the previous command is not.
-        self.relative_base = "measured"
-        # "resync": build on the previous command, but per joint compare the command sent
-        # ``resync_lag`` steps ago with the reading now; where they differ by more than
-        # ``resync_threshold`` (radians, per joint) the joint is blocked (e.g. the gripper on the
-        # cube), so that joint's base snaps back to its reading. Stops command wind-up.
-        self.resync_lag = 3
-        # Normal tracking gap |q(t) - cmd(t-3)| in successful episodes stays under ~7.5 deg on the
-        # arm joints (any latency 0-3); the gripper's threshold is tighter to catch the squeeze.
-        self.resync_threshold = np.deg2rad([10.0] * 5 + [5.0])
-        self._sent: deque = deque()
-        self.resync_count = np.zeros(6, int)
-        # Latch: a joint flagged as blocked stays on its reading until the reading moves again
-        # (|q(t) - q(t - lag)| > resync_moving radians); otherwise the gap closes after a resync
-        # and the command winds up again for ``lag`` steps before the next detection.
-        self.resync_latch = True
-        self.resync_moving = np.deg2rad(1.0)
-        self._readings: deque = deque()
-        self._blocked = np.zeros(6, bool)
+        # Relative actions -> targets (action_mapping.py, shared with the hardware runner). The base
+        # ("measured" / "command" / "resync") is part of the run config, so loading a model's
+        # bc_config.json selects it; see train_bc.env_kwargs.
+        self.mapper = (ActionMapper(self.relative_scale, self.world.lo, self.world.hi, base=relative_base,
+                                    **(resync or {})) if action_mode == "relative" else None)
         self._pending: deque = deque()
         self._held = self.home.copy()
         self._frames: deque = deque(maxlen=history)
@@ -455,14 +443,24 @@ class _So101TaskEnv(gym.Env):
         self._target_ctrl = q.copy()
         self._pending.clear()
         self._held = q.copy()
-        self._sent.clear()
-        self._readings.clear()
-        self._blocked = np.zeros(6, bool)
-        self.resync_count = np.zeros(6, int)
+        if self.mapper is not None:
+            self.mapper.reset(q)
         self._steps = 0
         self._reset_task()
         mujoco.mj_forward(self.world.model, self.world.data)
         return self._observe(fresh=True), {"is_success": False}
+
+    @property
+    def relative_base(self) -> str:
+        return self.mapper.base if self.mapper is not None else "measured"
+
+    @relative_base.setter
+    def relative_base(self, base: str) -> None:
+        if self.mapper is None:
+            raise ValueError("relative_base applies to action_mode='relative' only")
+        if base not in ("measured", "command", "resync"):
+            raise ValueError(f"unknown relative_base {base!r}")
+        self.mapper.base = base  # takes effect from the next reset onward in practice (set before reset)
 
     def _apply_action(self, action: np.ndarray) -> None:
         w = self.world
@@ -470,25 +468,9 @@ class _So101TaskEnv(gym.Env):
         if self.action_mode == "delta":
             self._target_ctrl = np.clip(self._target_ctrl + a * self.delta_scale, w.lo, w.hi)
         elif self.action_mode == "relative":
-            # Motion from where the arm is now (measured), not from the last command.
-            base = w.qpos if self.relative_base == "measured" else self._target_ctrl.copy()
-            if self.relative_base == "resync" and len(self._sent) >= self.resync_lag:
-                off = np.abs(w.qpos - self._sent[-self.resync_lag]) > self.resync_threshold
-                if self.resync_latch:
-                    moving = (np.abs(w.qpos - self._readings[-self.resync_lag]) > self.resync_moving
-                              if len(self._readings) >= self.resync_lag else np.ones(6, bool))
-                    self._blocked = (self._blocked & ~moving) | off
-                    off = self._blocked
-                base[off] = w.qpos[off]
-                self.resync_count += off
-            self._target_ctrl = np.clip(base + a * self.relative_scale, w.lo, w.hi)
+            self._target_ctrl = self.mapper(a, w.qpos)
         else:
             self._target_ctrl = w.lo + (a + 1) / 2 * (w.hi - w.lo)
-        self._sent.append(self._target_ctrl.copy())
-        self._readings.append(w.qpos.copy())
-        if len(self._sent) > 8:
-            self._sent.popleft()
-            self._readings.popleft()
         applied = self._target_ctrl
         if self.action_latency:
             self._pending.append(self._target_ctrl.copy())
