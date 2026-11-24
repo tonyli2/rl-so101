@@ -27,6 +27,7 @@ wrist images are recorded. Do not run two programs against the same leader port.
 
 - [Local ACT training, evaluation and Trackio](docs/training.md)
 - [Collision-aware collection and robustness evaluation](docs/robustness-evaluation.md)
+- [Share and archive datasets](docs/dataset-sharing.md)
 - [Dataset quarantine and original episode mappings](docs/dataset-quarantine.md)
 - [Collection, dataset format, validation and replay](docs/collection.md)
 - [Mounted scene, configuration, camera assumptions and asset sources](docs/simulation.md)

@@ -7,7 +7,7 @@ metadata, statistics and exact MuJoCo archives kept consistent.
 
 | Directory | Purpose | Episodes | Frames |
 | --- | --- | ---: | ---: |
-| `lerobot-tabletop/recordings/sim-baseline/` | Active clean baseline: 32 retained plus 18 replacements | 50 | 25,666 |
+| `lerobot-tabletop/recordings/archive/sim-baseline/` | Archived old-scene baseline: 32 retained plus 18 replacements; not current-scene training data | 50 | 25,666 |
 | `lerobot-tabletop/recordings/archived-sim-baseline-collision/` | Quarantined contact examples; do not train | 18 | 8,725 |
 | `outputs/dataset-backups/sim-baseline-original-50/` | Untouched historical source; evaluation only, not training | 50 | 26,006 |
 

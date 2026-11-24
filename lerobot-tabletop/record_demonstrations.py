@@ -55,8 +55,8 @@ def main():
     parser.add_argument(
         "--layout-reference",
         type=Path,
-        default=Path(__file__).parent / "recordings/sim-baseline",
-        help="Clean demonstration dataset providing approach/release IK seeds",
+        default=Path(__file__).parent / "recordings/archive/sim-baseline",
+        help="Historical demonstration dataset used only for approach/release IK seeds",
     )
     parser.add_argument(
         "--headless", action="store_true", help="Offscreen cameras, no MuJoCo window"

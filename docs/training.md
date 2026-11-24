@@ -13,7 +13,13 @@ video encoding and Trackio logger. It never opens a leader serial port.
 `evaluate_act.py` registers the same task for LeRobot's standalone evaluator.
 No upstream LeRobot files are modified.
 
-## Clean 50-demonstration baseline
+## Historical clean 50-demonstration baseline
+
+The commands below document the old-scene experiment, not a training recipe for
+the updated physical-layout scene. Its 50 demonstrations now live under
+`recordings/archive/sim-baseline`. Collect a new dataset for current-scene training.
+Previously saved run configurations retain their original paths; override dataset
+and reset-dataset paths when reproducing them after this move.
 
 ```bash
 conda activate lerobot
@@ -25,7 +31,7 @@ tmux new -s act
 systemd-inhibit --what=sleep --mode=block --why="ACT training" \
 python train_act.py \
   --dataset.repo_id=local/sim-baseline \
-  --dataset.root="$PWD/recordings/sim-baseline" \
+  --dataset.root="$PWD/recordings/archive/sim-baseline" \
   --dataset.video_backend=pyav \
   --dataset.eval_split=0.1 \
   --policy.type=act \
@@ -46,7 +52,7 @@ python train_act.py \
   --max_eval_samples=600 \
   --env.type=so101_tabletop \
   --env.episode_length=900 \
-  --env.reset_dataset_root="$PWD/recordings/sim-baseline" \
+  --env.reset_dataset_root="$PWD/recordings/archive/sim-baseline" \
   --env.reset_episode=0 \
   --env_eval_freq=10000 \
   --eval.n_episodes=1 \
@@ -136,7 +142,7 @@ python evaluate_act.py \
   --policy.path=../outputs/train/act-sim-baseline-100k/checkpoints/last/pretrained_model \
   --env.type=so101_tabletop \
   --env.episode_length=900 \
-  --env.reset_dataset_root="$PWD/recordings/sim-baseline" \
+  --env.reset_dataset_root="$PWD/recordings/archive/sim-baseline" \
   --env.reset_episode=0 \
   --eval.n_episodes=1 --eval.batch_size=1 --eval.use_async_envs=false \
   --output_dir=../outputs/eval/act-sim-baseline-100k

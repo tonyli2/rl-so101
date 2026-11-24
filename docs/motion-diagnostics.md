@@ -11,7 +11,7 @@ Run from `lerobot-tabletop/` in the lerobot Conda environment:
 ```bash
 python diagnose_motion.py \
   --run ../outputs/train/act-sim-baseline-100k \
-  --dataset recordings/sim-baseline \
+  --dataset recordings/archive/sim-baseline \
   --output ../outputs/motion-diagnostics-new
 python -m learning.plot_motion ../outputs/motion-diagnostics-new
 python -m unittest discover -s tests -p test_motion_diagnostics.py -v
