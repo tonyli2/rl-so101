@@ -45,7 +45,22 @@ The measured camera is in `mounts/config.json` as `overhead_camera_measured`.
 `environment.py` still uses `overhead_camera`, so existing demos and policies are unaffected.
 Real frames must be undistorted with the lens values before comparing them with sim renders.
 
-Not done: the wrist camera.
+### Wrist camera lens (intrinsics), 2026-11-23
+
+Same camera model, 640x480, 40 views, 0.253 px RMS, board coverage 55% (top-right and
+bottom-left corners uncovered; k3 held at 0, monotonic to the corners).
+
+| Value | Wrist | Overhead |
+|---|---|---|
+| fx, fy | 545.3, 545.5 px | 549.8, 550.1 px |
+| cx, cy | 320.2, 254.6 px | 334.5, 269.4 px |
+| Distortion `[k1, k2, p1, p2, k3]` | `[-0.4351, 0.1923, -0.0006, 0.003, 0]` | `[-0.437, 0.1936, -0.0009, -0.0001, 0]` |
+| MuJoCo `fovy` after undistorting | 47.50 deg | 47.15 deg |
+
+Same lens (focal length and distortion within 1%), but the optical centre differs by about
+20 px, so each camera must be undistorted with its own values. The sim's wrist `fovy` is 61;
+the measured value is in `mounts/config.json` as `wrist_camera_measured` (not read by
+`environment.py`). The wrist camera's pose comes from the mount CAD and was not measured.
 
 ---
 

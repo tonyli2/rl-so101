@@ -208,5 +208,37 @@
     "mount_mass": 0.012,
     "camera_mass": 0.005,
     "camera_plate_side": -1.0
+  },
+  "wrist_camera_measured": {
+    "_note": "Wrist camera lens measured with ChArUco on 2026-11-23 (camera_calibration/results/wrist_intrinsics.json). environment.py does not read this; it uses wrist.fovy (61). Pose comes from the mount CAD and was not measured. Undistort real wrist frames with these values (not the overhead ones: the optical centre differs by about 20 px).",
+    "fovy": 47.499,
+    "intrinsics_640x480": {
+      "camera_matrix": [
+        [
+          545.28,
+          0.0,
+          320.154
+        ],
+        [
+          0.0,
+          545.457,
+          254.554
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "distortion": [
+        -0.43508,
+        0.19229,
+        -0.0006,
+        0.00298,
+        0.0
+      ],
+      "rms_reprojection_px": 0.253,
+      "image_coverage_pct": 55.2
+    }
   }
 }
