@@ -1,6 +1,57 @@
 # Camera results for sim matching
 
-Date: 2026-11-22. Camera: the overhead (bird's-eye) camera on the Jetson.
+## Board calibration, 2026-11-23 (supersedes the provisional values below)
+
+Overhead (bird's-eye) camera, Innomaker U20CAM-1080p-S1 at **640x480**, calibrated with the
+ChArUco board on a Mac (`camera_calibration/browser_capture.py` + `calib.py`, steps in
+`camera_calibration/RUN_ON_MAC.md`). Files: `lerobot-tabletop/camera_calibration/results/`.
+
+### Lens (intrinsics)
+
+| Value | Result |
+|---|---|
+| fx, fy | 549.8, 550.1 px |
+| cx, cy | 334.5, 269.4 px (14 px right of and 29 px below the image centre) |
+| Distortion `[k1, k2, p1, p2, k3]` | `[-0.437, 0.1936, -0.0009, -0.0001, 0]` (k3 held at 0) |
+| RMS reprojection error | 0.295 px over 61 views |
+| MuJoCo `fovy` after undistorting | 47.15 deg |
+
+- Board coverage reached 67% of the image; each image corner is only about 10% covered. With k3
+  free the distortion curve folded back before the corners, so `calib.py` now keeps k3 = 0 by
+  default (0.295 vs 0.289 px, well behaved to the corners). `--free-k3` restores it.
+- The provisional estimate further down (fx 419.4, fovy 59.6) was wrong by about 30%.
+
+### Pose (extrinsics), sim world frame
+
+Board flat in front of the arm, origin dot 205 mm forward of and 20 mm left of the shoulder-pan
+axis, board surface 5 mm above the table (`--board-in-world 0.2161 0.020 0.005 -90`).
+15 frames, 0.18 px reprojection, spread under 0.3 mm.
+
+| | Measured | Sim `overhead_camera` (nominal) |
+|---|---|---|
+| pos (m) | [0.0536, -0.0460, 0.5356] | [0.0331, 0.0, 0.5439] |
+| Tilt from straight down | 24.5 deg | 24.3 deg |
+| Yaw | 2.8 deg | 0 |
+| fovy | 47.15 deg | 60 deg |
+
+Height and tilt (from the board alone) match the designed mount within 1 cm and 0.2 deg. The
+real camera sits 46 mm to the right, 21 mm further forward, and sees a much narrower view.
+
+Tape checks at the very edges of the picture agreed within about 5% (720 mm across the image
+at 50 mm forward vs 755 mm computed; 147 mm from the origin dot to the bottom edge vs 140 mm),
+consistent with the less certain lens model at the image edges.
+
+The measured camera is in `mounts/config.json` as `overhead_camera_measured`.
+`environment.py` still uses `overhead_camera`, so existing demos and policies are unaffected.
+Real frames must be undistorted with the lens values before comparing them with sim renders.
+
+Not done: the wrist camera.
+
+---
+
+# Provisional results, 2026-11-22 (superseded)
+
+Camera: the overhead (bird's-eye) camera on the Jetson.
 Full values for every camera mode are in
 [`lerobot-tabletop/camera_calibration/provisional_intrinsics.json`](lerobot-tabletop/camera_calibration/provisional_intrinsics.json).
 
@@ -14,7 +65,7 @@ Full values for every camera mode are in
 | Overhead extrinsics (position and angle) | Not measured |
 | Wrist camera | Not measured (same model, was unplugged) |
 
-These are provisional. A board calibration with `calib.py` replaces them.
+These were provisional and are replaced by the board calibration above.
 
 ## The camera
 

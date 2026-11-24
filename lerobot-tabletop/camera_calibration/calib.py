@@ -380,12 +380,16 @@ def cmd_capture(a):
 
 
 # ---------------------------------------------------------------- intrinsics
-def calibrate(views, board, size, rational=False):
+def calibrate(views, board, size, rational=False, free_k3=False):
     """views: list of (label, corners, ids). Returns dict of results."""
 
     def run(vs):
         obj, img = zip(*[board.matchImagePoints(c, i) for _, c, i in vs])
         flags = cv2.CALIB_RATIONAL_MODEL if rational else 0
+        if not rational and not free_k3:
+            # k3 is poorly constrained unless the board reaches the image corners, and a free k3
+            # can make the distortion curve fold back there; k1, k2 extrapolate sanely.
+            flags |= cv2.CALIB_FIX_K3
         rms, K, dist, rv, tv = cv2.calibrateCamera(
             obj, img, size, None, None, flags=flags
         )
@@ -447,15 +451,24 @@ def cmd_intrinsics(a):
         sys.exit(
             f"Only {len(views)} usable views (need at least 10, ideally 25+). Capture more."
         )
-    r = calibrate(views, board, size, a.rational)
+    r = calibrate(views, board, size, a.rational, a.free_k3)
     w, h = size
     fx, fy = fov_deg(r["K"], w, h)
     coverage = cover.mean() / 2.55
+    # The distortion must map larger angles to larger image radii all the way to the image corners,
+    # otherwise undistorting near the corners gives nonsense.
+    corners = np.array([[[0, 0]], [[w - 1, 0]], [[0, h - 1]], [[w - 1, h - 1]]], np.float32)
+    r_max = float(np.max(np.linalg.norm(cv2.undistortPoints(corners, r["K"], r["dist"]).reshape(-1, 2), axis=1)))
+    r_u = np.linspace(0, r_max, 400)
+    r_u2 = cv2.projectPoints(
+        np.stack([r_u, np.zeros_like(r_u), np.ones_like(r_u)], 1), np.zeros(3), np.zeros(3), np.eye(3), r["dist"]
+    )[0].reshape(-1, 2)[:, 0]
+    monotonic = bool(np.all(np.diff(r_u2) > 0))
     res = dict(
         name=a.name,
         width=w,
         height=h,
-        model="opencv_rational8" if a.rational else "opencv_plumb_bob5",
+        model="opencv_rational8" if a.rational else ("opencv_plumb_bob5" if a.free_k3 else "opencv_plumb_bob5_k3_fixed_0"),
         camera_matrix=r["K"].tolist(),
         distortion=r["dist"].tolist(),
         fx=r["K"][0, 0],
@@ -468,6 +481,7 @@ def cmd_intrinsics(a):
         views_used=len(r["used"]),
         views_dropped=r["dropped"],
         image_coverage_pct=coverage,
+        distortion_monotonic_to_corners=monotonic,
         square_mm=a.square_mm,
         date=time.strftime("%Y-%m-%d %H:%M"),
     )
@@ -513,6 +527,11 @@ def cmd_intrinsics(a):
         print(
             "  WARNING: the board covered less than 60% of the image - distortion near the edges is poorly constrained."
         )
+    if not monotonic:
+        print(
+            "  WARNING: the distortion model folds back before the image corners - undistorting there is invalid. "
+            "Capture views in the corners, or drop --free-k3."
+        )
     print(f"saved {p}")
 
 
@@ -551,7 +570,10 @@ def camera_pose(rvec, tvec, square_mm, board_in_base):
 def cmd_extrinsics(a):
     board = make_board(a.square_mm)
     if a.image:
-        frames = [cv2.imread(a.image)]
+        frames = [cv2.imread(p) for p in a.image]
+        missing = [p for p, f in zip(a.image, frames) if f is None]
+        if missing:
+            sys.exit(f"Could not read {', '.join(missing)}")
     else:
         cap = open_camera(a.device, a.width, a.height)
         frames = [cap.read()[1] for _ in range(a.frames)]
@@ -745,13 +767,22 @@ def main():
         action="store_true",
         help="8-coefficient distortion model for very wide lenses",
     )
+    p.add_argument(
+        "--free-k3",
+        action="store_true",
+        help="also fit k3 (default keeps k3 = 0; only use when the board covered the image corners)",
+    )
     p.set_defaults(fn=cmd_intrinsics)
     p = sub.add_parser("extrinsics")
     cam(p)
     p.add_argument(
         "--intrinsics", help="name of the intrinsics to use (default: same as --name)"
     )
-    p.add_argument("--image", help="use a saved image instead of the live camera")
+    p.add_argument(
+        "--image",
+        nargs="+",
+        help="use saved image(s) instead of the live camera, e.g. captures/overhead_extrinsics/*.png",
+    )
     p.add_argument("--frames", type=int, default=15)
     p.add_argument(
         "--board-in-world",

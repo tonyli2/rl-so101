@@ -135,6 +135,57 @@
       0.5484442368457522
     ]
   },
+  "overhead_camera_measured": {
+    "_note": "Measured with ChArUco on 2026-11-23 (camera_calibration/results/overhead_*.json). environment.py does not read this; it uses overhead_camera. Switch only with data recorded or re-rendered from this pose. Undistort real frames with camera_matrix + distortion before comparing with renders.",
+    "pos": [
+      0.05355,
+      -0.046,
+      0.53556
+    ],
+    "xyaxes": [
+      -0.04814,
+      -0.9988,
+      0.00861,
+      0.90882,
+      -0.04022,
+      0.41525
+    ],
+    "fovy": 47.146,
+    "intrinsics_640x480": {
+      "camera_matrix": [
+        [
+          549.789,
+          0.0,
+          334.528
+        ],
+        [
+          0.0,
+          550.051,
+          269.36
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "distortion": [
+        -0.43704,
+        0.19358,
+        -0.00088,
+        -0.00012,
+        0.0
+      ],
+      "rms_reprojection_px": 0.295
+    },
+    "board_in_world_xyz_m_yaw_deg": [
+      0.2161,
+      0.02,
+      0.005,
+      -90.0
+    ],
+    "extrinsics_reprojection_px": 0.183
+  },
   "wrist": {
     "mesh_pos": [
       -0.01495,
