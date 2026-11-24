@@ -52,20 +52,61 @@ def detect(gray, board):
     return c, ids
 
 
+IS_MAC = sys.platform == "darwin"
+DEFAULT_DEVICE = "0" if IS_MAC else "/dev/video0"
+
+
 def open_camera(device, width, height):
-    dev = os.path.realpath(device) if not str(device).isdigit() else int(device)
-    cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    """Open a camera: a /dev/videoN path or index on Linux (V4L2), an index on macOS (AVFoundation)."""
+    if IS_MAC:
+        if not str(device).isdigit():
+            sys.exit(f"On macOS --device is a camera index (0, 1, ...), not '{device}'. Run 'calib.py cameras' to see which is which.")
+        cap = cv2.VideoCapture(int(device), cv2.CAP_AVFOUNDATION)
+    else:
+        dev = os.path.realpath(device) if not str(device).isdigit() else int(device)
+        cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     if not cap.isOpened():
         sys.exit(
-            f"Could not open camera {device}. Is another program using it (camera_stream.py, show_cameras.sh)?"
+            f"Could not open camera {device}. Is another program using it (a browser tab with the camera page, "
+            f"camera_stream.py, show_cameras.sh)? On macOS, also allow camera access for the terminal app."
         )
+    frame = None
     for _ in range(10):
-        cap.read()
+        ok, f = cap.read()
+        frame = f if ok else frame
+    if frame is None:
+        sys.exit(f"Camera {device} opened but gave no frames.")
+    h, w = frame.shape[:2]
+    if (w, h) != (width, height):
+        # A different mode means a different crop of the sensor, so the calibration would not match.
+        sys.exit(f"Camera {device} gives {w}x{h}, not the requested {width}x{height}.")
     return cap
+
+
+def cmd_cameras(a):
+    """Save one frame from each camera index so you can see which index is which camera."""
+    out = os.path.join(CAPDIR, "_which_camera")
+    os.makedirs(out, exist_ok=True)
+    backend = cv2.CAP_AVFOUNDATION if IS_MAC else cv2.CAP_V4L2
+    for i in range(a.max_index + 1):
+        cap = cv2.VideoCapture(i, backend)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, a.width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, a.height)
+        frame = None
+        for _ in range(15):
+            ok, f = cap.read()
+            frame = f if ok else frame
+        cap.release()
+        if frame is None:
+            print(f"  index {i}: no camera")
+            continue
+        p = os.path.join(out, f"index{i}.jpg")
+        cv2.imwrite(p, frame)
+        print(f"  index {i}: {frame.shape[1]}x{frame.shape[0]} -> {p}")
 
 
 # ---------------------------------------------------------------- maths helpers
@@ -317,19 +358,21 @@ def cmd_capture(a):
             tint = vis.copy()
             tint[covered > 0] = (0, 160, 0)
             vis = cv2.addWeighted(vis, 0.8, tint, 0.2, 0)
+            # Draw the status on the preview copy at 960 px wide so it stays legible at 640x480.
+            vis = cv2.resize(vis, (960, 960 * h // w))
             if time.time() - last_save < 0.3:
-                cv2.rectangle(vis, (0, 0), (w - 1, h - 1), (0, 255, 0), 30)
-            cv2.rectangle(vis, (0, 0), (w, 60), (0, 0, 0), -1)
+                cv2.rectangle(vis, (0, 0), (vis.shape[1] - 1, vis.shape[0] - 1), (0, 255, 0), 20)
+            cv2.rectangle(vis, (0, 0), (vis.shape[1], 44), (0, 0, 0), -1)
             cv2.putText(
                 vis,
                 f"{a.name}: {n}/{a.count} saved | {status} | green = area covered",
-                (15, 42),
+                (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                1.1,
+                0.7,
                 (255, 255, 255),
                 2,
             )
-            prev.show(cv2.resize(vis, (960, 960 * h // w)))
+            prev.show(vis)
     except KeyboardInterrupt:
         pass
     cap.release()
@@ -666,9 +709,15 @@ def main():
             required=True,
             help="label for this camera, e.g. cam1_birdseye or cam2_wrist",
         )
-        p.add_argument("--device", default="/dev/video0")
-        p.add_argument("--width", type=int, default=1280)
-        p.add_argument("--height", type=int, default=960)
+        p.add_argument(
+            "--device",
+            default=DEFAULT_DEVICE,
+            help="camera index on macOS (see 'calib.py cameras'), /dev/videoN on Linux",
+        )
+        # 640x480 is the sim's resolution. Calibrate in the same mode the policy uses:
+        # other modes crop the sensor differently, so their lens values do not carry over.
+        p.add_argument("--width", type=int, default=640)
+        p.add_argument("--height", type=int, default=480)
         p.add_argument(
             "--square-mm",
             type=float,
@@ -677,11 +726,16 @@ def main():
         )
 
     sub.add_parser("board").set_defaults(fn=cmd_board)
+    p = sub.add_parser("cameras", help="save one frame per camera index to see which is which")
+    p.add_argument("--max-index", type=int, default=3)
+    p.add_argument("--width", type=int, default=640)
+    p.add_argument("--height", type=int, default=480)
+    p.set_defaults(fn=cmd_cameras)
     p = sub.add_parser("capture")
     cam(p)
     p.add_argument("--count", type=int, default=30)
     p.add_argument("--min-corners", type=int, default=12)
-    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--port", type=int, default=8001)
     p.set_defaults(fn=cmd_capture)
     p = sub.add_parser("intrinsics")
     p.add_argument("--name", required=True)
