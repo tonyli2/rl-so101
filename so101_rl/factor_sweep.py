@@ -180,9 +180,10 @@ def main() -> None:
     parser.add_argument("--policies", nargs="+", help="subset of policies (bc, main_nominal_s1, ...)")
     parser.add_argument("--n-envs", type=int, default=8)
     parser.add_argument("--episodes", type=int, help="use only the first N of the 40 starts (smoke tests)")
-    parser.add_argument("--relative-base", choices=("measured", "command"), default="measured",
-                        help="base of relative actions at test time: measured joints (as trained) or the "
-                             "previous command (robust to control latency)")
+    parser.add_argument("--relative-base", choices=("measured", "command", "resync"), default="measured",
+                        help="base of relative actions at test time: measured joints (as trained), the "
+                             "previous command (robust to control latency), or the previous command with "
+                             "blocked joints re-synced to their reading (no gripper wind-up)")
     args = parser.parse_args()
 
     prepare_mounted(rebuild=True)

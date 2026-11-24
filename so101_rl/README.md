@@ -143,8 +143,33 @@ command`) fixes it with no retraining (`outputs/sweeps/step500000_cmdbase`, 40 e
 | combined_moderate | 71% | 63% | 89% | 96% |
 
 Training with latency randomized over 0-3 steps (`train_ppo.py --randomize ... actuator`) did not
-help with the measured base: 0% at 2 and 3 steps after 200k steps (pilot stopped). Deploy with the
-command base.
+help with the measured base: 0% at 2 and 3 steps after 200k steps (pilot stopped).
+
+**Command wind-up and the resync base (deploy with this).** The command base has a flaw: when a
+joint is blocked (the gripper closed on the cube) the policy keeps saying "close a bit more", the
+command keeps accumulating (the policy never sees its commands), and the servo squeezes ever harder:
+in sim the gripper command runs ~18 deg past the fingers, to its joint limit, for the whole carry.
+On the real arm that means a stalled gripper at its torque limit (LeRobot sets 50% torque, 50%
+current, 25% torque on overload), a possible drop, and a late release. `relative_base = "resync"`
+fixes it: per joint, compare the command sent 3 steps ago with the reading now (the delay means
+that is where the joint should be). Close: keep building on the previous command. Far apart
+(arm 10 deg, gripper 5 deg; normal tracking stays under 7.5 deg): the joint is blocked, so its base
+snaps to its reading and stays there until the reading moves again (latch; without it the gap
+closes after a resync and the command winds up again for 3 steps).
+
+| gripper command past the fingers while carrying (20 episodes) | median | max | success |
+|---|---|---|---|
+| measured base, latency 0 | 3.2 deg | 7.3 deg | 100% |
+| command base, latency 3 | 17.7 deg | 18.0 deg | 100% |
+| resync base, latency 2 | 3.0 deg | 7.6 deg | 100% |
+| resync base, latency 3 | 3.5 deg | 15.0 deg | 100% |
+
+The remaining max is a brief spike at grasp: contact shows up in the reading only after the delay.
+Arm joints never re-synced (no false triggers). Full sweep with the resync base
+(`outputs/sweeps/step500000_resync`, 7 policies x 12 settings x 40 episodes): nominal 96% / 97%
+(nominal / randomized PPO), latency 2 steps 96% / 98%, latency 3 steps 93% / 98%, friction 0.30
+91% / 97%, combined_moderate 70% / 95%, i.e. the same as the command base and the measured base
+without latency.
 
 ## Run
 
