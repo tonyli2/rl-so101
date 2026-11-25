@@ -86,7 +86,7 @@ def main() -> None:
     prepare_mounted(rebuild=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_bc.load_config(args.model)  # the model's observation settings (history, velocities)
-    demos = train_bc.Demos(train_bc.DATA, device)
+    demos = train_bc.Demos(train_bc.data_path(), device)
     model = PPO.load(args.model, device=device)
     policy = model.policy
     policy.set_training_mode(False)
@@ -95,7 +95,7 @@ def main() -> None:
     UNITS.update(half_range=demos.half_range, span=demos.span)
     world.close()
 
-    labels = phase_labels(train_bc.VAL_EPISODES)
+    labels = phase_labels(train_bc.val_episodes())
     val_idx = demos.val_idx
     phase = np.empty(len(val_idx), np.int64)
     for ep, ep_labels in labels.items():

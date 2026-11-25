@@ -14,10 +14,15 @@ Every run saves an evaluated checkpoint every "eval_every" steps; main_summary.j
 run's success-vs-steps curve.
 
     python run_main_experiment.py
+    python run_main_experiment.py --plan outputs/ppo/scene2_plan.json   # another experiment
+
+Optional plan keys: "randomize_ranges" (train_ppo.py --randomize-ranges file) and "extra_args"
+(list of further train_ppo.py arguments, e.g. ["--quick-eval"]).
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -82,6 +87,12 @@ def decide_encoder(plan: dict) -> str:
 
 
 def main() -> None:
+    global PLAN, SUMMARY
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--plan", type=Path, default=PLAN, help="plan json (created with defaults if missing)")
+    args = parser.parse_args()
+    PLAN = args.plan
+    SUMMARY = PLAN.with_name(PLAN.stem.replace("_plan", "") + "_summary.json") if PLAN != OUT / "main_plan.json" else SUMMARY
     OUT.mkdir(parents=True, exist_ok=True)
     i = 0
     while True:
@@ -102,6 +113,9 @@ def main() -> None:
             cmd.append("--train-encoder")
         if run["randomize"]:
             cmd.append("--randomize")
+            if plan.get("randomize_ranges"):
+                cmd += ["--randomize-ranges", plan["randomize_ranges"]]
+        cmd += [str(a) for a in plan.get("extra_args", [])]
         log(f"start {name}: {' '.join(cmd[2:])}")
         start = time.time()
         with open(OUT / f"{name}.log", "w") as f:

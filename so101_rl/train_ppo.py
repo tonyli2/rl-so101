@@ -46,12 +46,11 @@ from envs import So101PickPlaceEnv, So101World, prepare_mounted
 
 HERE = Path(__file__).parent
 OUT = HERE / "outputs" / "ppo"
-TRAIN_EPISODES = set(range(45))
 
 
 def demo_starts() -> SimpleNamespace:
     """First observation of every demonstration, in the shape train_bc.start_poses expects."""
-    d = np.load(train_bc.DATA)  # lazy: only these arrays are read, not the images
+    d = np.load(train_bc.data_path())  # lazy: only these arrays are read, not the images
     first = d["frame"] == 0
     return SimpleNamespace(starts=d["states"][first], start_episode=d["episode"][first].astype(np.int64))
 
@@ -61,12 +60,15 @@ def start_joints(starts: SimpleNamespace, world: So101World, episodes: set[int])
 
 
 def eval_starts(starts: SimpleNamespace, world: So101World, seed: int = 10_000) -> dict[str, list]:
-    """A fixed 40-episode subset of train_bc's 115-episode evaluation (same seeds, so comparable)."""
-    val, train = train_bc.VAL_EPISODES, TRAIN_EPISODES
+    """About 40-55 fixed starts: every validation episode exactly and jittered (~20 jittered in
+    all), plus ~15 training episodes. For Tony's 50 demos this is the original 5 + 20 + 15, a
+    subset of train_bc's 115-episode evaluation (same seeds, so comparable)."""
+    val, train = sorted(train_bc.val_episodes()), sorted(train_bc.train_episodes())
+    copies = max(1, 20 // len(val))
     return {
-        "val_exact": train_bc.start_poses(starts, world, val),
-        "val_jitter3deg": train_bc.start_poses(starts, world, val, 3.0, 4, seed),
-        "train_exact": train_bc.start_poses(starts, world, train)[::3],
+        "val_exact": train_bc.start_poses(starts, world, set(val)),
+        "val_jitter3deg": train_bc.start_poses(starts, world, set(val), 3.0, copies, seed),
+        "train_exact": train_bc.start_poses(starts, world, set(train))[:: max(1, len(train) // 15)][:15],
     }
 
 
@@ -216,7 +218,7 @@ def main() -> None:
 
     world = So101World()
     starts = demo_starts()
-    train_starts = start_joints(starts, world, TRAIN_EPISODES)
+    train_starts = start_joints(starts, world, train_bc.train_episodes())
     evals = eval_starts(starts, world)
     if args.quick_eval:
         evals = {"val_exact": evals["val_exact"]}

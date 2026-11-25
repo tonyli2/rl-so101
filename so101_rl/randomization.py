@@ -6,7 +6,8 @@ The four factors of the proposal, each applied by editing the compiled MuJoCo mo
 * ``texture``  - table, floor and wall appearance: one of several procedural textures with a random
   tint. Training and testing draw from disjoint texture sets ("held-out textures").
 * ``lighting`` - direction, brightness, colour tint and ambient level of the scene lights.
-* ``camera``   - overhead (task) camera position, rotation and vertical field of view.
+* ``camera``   - overhead (task) camera position, rotation and vertical field of view; with
+                 ``wrist_*`` ranges set, the wrist camera too (its real mounting is unmeasured).
 * ``friction`` - object-finger sliding friction (physics: matters for RL, not for BC images).
 
 A factor setting is a plain dict of numbers, so evaluation sweeps can set one factor to a fixed
@@ -41,7 +42,7 @@ TEXTURES = [
 ]
 TRAIN_TEXTURES = list(range(6))
 HELDOUT_TEXTURES = list(range(6, 9))
-SURFACES = ("table", "floor", "wall")  # material names in the mounted scene
+SURFACES = ("table", "floor", "wall", "paper")  # material names in the mounted scene (paper: enclosure)
 
 
 def add_textures(spec: mujoco.MjSpec) -> None:
@@ -74,6 +75,10 @@ class Ranges:
     camera_pos_m: float = 0.015         # +- per axis
     camera_rot_deg: float = 3.0         # +- about each axis
     camera_fovy_deg: float = 3.0        # +- vertical field of view
+    # Wrist camera (CAD pose, not measured on the robot). 0 = not randomized (the old default).
+    wrist_pos_m: float = 0.0
+    wrist_rot_deg: float = 0.0
+    wrist_fovy_deg: float = 0.0
     friction: tuple = (0.4, 1.2)        # object-finger sliding friction
     # Control latency in 33 ms control steps, sampled uniformly from 0..this. Measured on the real
     # arm: camera ~26 ms + frame age 0-33 ms + servo dead time ~40-50 ms = ~76-110 ms (2.3-3.3 steps).
@@ -92,9 +97,14 @@ class Randomizer:
         self.world = world
         m = world.model
         self.camera = m.camera(camera).id
-        self.cam_pos0 = m.cam_pos[self.camera].copy()
-        self.cam_quat0 = m.cam_quat[self.camera].copy()
-        self.cam_fovy0 = float(m.cam_fovy[self.camera])
+        self.wrist = m.camera("wrist_cam").id if mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_CAMERA, "wrist_cam") >= 0 else None
+        cams = [c for c in (self.camera, self.wrist) if c is not None]
+        self.cam_pos0 = {c: m.cam_pos[c].copy() for c in cams}
+        self.cam_quat0 = {c: m.cam_quat[c].copy() for c in cams}
+        self.cam_fovy0 = {c: float(m.cam_fovy[c]) for c in cams}
+        # Cameras with measured intrinsics (sensorsize + focal length) ignore cam_fovy: their field
+        # of view is changed through the focal length instead.
+        self.cam_intrinsic0 = {c: m.cam_intrinsic[c].copy() for c in cams}
         self.light_dir0 = m.light_dir.copy()
         self.light_diffuse0 = m.light_diffuse.copy()
         self.ambient0 = m.vis.headlight.ambient.copy()
@@ -143,6 +153,11 @@ class Randomizer:
             p["camera"] = {"pos_m": (s * rng.uniform(-ranges.camera_pos_m, ranges.camera_pos_m, 3)).tolist(),
                            "rot_deg": (s * rng.uniform(-ranges.camera_rot_deg, ranges.camera_rot_deg, 3)).tolist(),
                            "fovy_deg": float(s * rng.uniform(-ranges.camera_fovy_deg, ranges.camera_fovy_deg))}
+            if self.wrist is not None and (ranges.wrist_pos_m or ranges.wrist_rot_deg or ranges.wrist_fovy_deg):
+                p["camera"]["wrist"] = {
+                    "pos_m": (s * rng.uniform(-ranges.wrist_pos_m, ranges.wrist_pos_m, 3)).tolist(),
+                    "rot_deg": (s * rng.uniform(-ranges.wrist_rot_deg, ranges.wrist_rot_deg, 3)).tolist(),
+                    "fovy_deg": float(s * rng.uniform(-ranges.wrist_fovy_deg, ranges.wrist_fovy_deg))}
         s = base * cap["friction"]
         toward = lambda nominal, lo, hi: (nominal + s * (lo - nominal), nominal + s * (hi - nominal))  # noqa: E731
         if "friction" in factors:
@@ -155,8 +170,9 @@ class Randomizer:
     # --- applying -----------------------------------------------------------------------------
     def nominal(self) -> None:
         m = self.world.model
-        m.cam_pos[self.camera], m.cam_quat[self.camera] = self.cam_pos0, self.cam_quat0
-        m.cam_fovy[self.camera] = self.cam_fovy0
+        for c in self.cam_pos0:
+            m.cam_pos[c], m.cam_quat[c] = self.cam_pos0[c], self.cam_quat0[c]
+            m.cam_fovy[c], m.cam_intrinsic[c] = self.cam_fovy0[c], self.cam_intrinsic0[c]
         m.light_dir[:], m.light_diffuse[:] = self.light_dir0, self.light_diffuse0
         m.vis.headlight.ambient[:] = self.ambient0
         for s, i in self.surface_mats.items():
@@ -166,6 +182,21 @@ class Randomizer:
         m.actuator_gainprm[self.act] = self.gain0
         m.actuator_biasprm[self.act] = self.bias0
         m.actuator_forcerange[self.act] = self.forcerange0
+
+    def _apply_camera(self, cam: int, c: dict) -> None:
+        m = self.world.model
+        m.cam_pos[cam] = self.cam_pos0[cam] + np.asarray(c["pos_m"])
+        dq = np.zeros(4)
+        mujoco.mju_euler2Quat(dq, np.deg2rad(c["rot_deg"]), "xyz")
+        q = np.zeros(4)
+        mujoco.mju_mulQuat(q, self.cam_quat0[cam], dq)
+        m.cam_quat[cam] = q
+        f0 = self.cam_fovy0[cam]
+        if m.cam_sensorsize[cam].any():  # measured intrinsics: scale the focal length
+            scale = np.tan(np.deg2rad(f0) / 2) / np.tan(np.deg2rad(f0 + c["fovy_deg"]) / 2)
+            m.cam_intrinsic[cam, :2] = self.cam_intrinsic0[cam][:2] * scale
+        else:
+            m.cam_fovy[cam] = f0 + c["fovy_deg"]
 
     def apply(self, p: dict) -> None:
         """Set factors in ``p`` (as produced by ``sample``); everything else returns to nominal."""
@@ -190,14 +221,9 @@ class Randomizer:
             m.light_diffuse[:] = np.clip(self.light_diffuse0 * L["scale"] + np.asarray(L["tint"]), 0, 1)
             m.vis.headlight.ambient[:] = L["ambient"]
         if "camera" in p:
-            c = p["camera"]
-            m.cam_pos[self.camera] = self.cam_pos0 + np.asarray(c["pos_m"])
-            dq = np.zeros(4)
-            mujoco.mju_euler2Quat(dq, np.deg2rad(c["rot_deg"]), "xyz")
-            q = np.zeros(4)
-            mujoco.mju_mulQuat(q, self.cam_quat0, dq)
-            m.cam_quat[self.camera] = q
-            m.cam_fovy[self.camera] = self.cam_fovy0 + c["fovy_deg"]
+            self._apply_camera(self.camera, p["camera"])
+            if "wrist" in p["camera"] and self.wrist is not None:
+                self._apply_camera(self.wrist, p["camera"]["wrist"])
         if "friction" in p:
             self.world.set_object_friction(p["friction"])
         if "actuator" in p:  # servo dynamics (latency is applied by the env, see actuator_latency)

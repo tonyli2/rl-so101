@@ -225,6 +225,7 @@ def main() -> None:
         kw = train_bc.env_kwargs(fixed_factors=fixed) if fixed else train_bc.env_kwargs()
         venv = SubprocVecEnv([partial(So101PickPlaceEnv, **kw)] * args.n_envs)
         venv.set_attr("relative_base", args.relative_base)
+        venv.seed(1234)
         try:
             for p in todo:
                 cond, seed, _ = pols[p]

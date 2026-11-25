@@ -1,0 +1,17 @@
+{
+  "source": "randomization_ranges.json caps (old-scene calibration) + wrist camera for the measured scene",
+  "ranges": {
+    "factor_strength": {
+      "texture": 0.5,
+      "lighting": 0.25,
+      "camera": 0.75,
+      "friction": 0.75
+    },
+    "wrist_pos_m": 0.01,
+    "wrist_rot_deg": 4.0,
+    "wrist_fovy_deg": 3.0
+  },
+  "rationale": {
+    "wrist": "the real wrist camera pose is CAD-derived, not measured (docs/sim2real.md); +-1 cm, +-4 deg, +-3 deg fovy before the camera cap of 0.75"
+  }
+}

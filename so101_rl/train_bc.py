@@ -41,23 +41,47 @@ from encoders import ResNetExtractor
 from envs import So101PickPlaceEnv, So101World, prepare_mounted
 
 HERE = Path(__file__).parent
-DATA = HERE / "outputs" / "bc_data" / "sim-baseline.npz"
+DATA_DIR = HERE / "outputs" / "bc_data"
 OUT = HERE / "outputs" / "bc"
-VAL_EPISODES = set(range(45, 50))
 # Observation/action settings of the current run; saved as bc_config.json next to each model so
-# --eval and --view rebuild the same env. Runs without that file (or keys) used these defaults.
+# --eval and --view rebuild the same env. Runs without that file (or keys) used these defaults:
+# Tony's teleoperated demos in the old scene, cube fixed.
 OBS = {"history": 3, "velocities": True, "action": "absolute", "relative_scale": None, "trim_idle": False,
-       "relative_base": "measured", "resync": None}
+       "relative_base": "measured", "resync": None,
+       "dataset": "sim-baseline", "cube_xy_range": 0.0, "cube_yaw_deg": 0.0}
+
+
+def data_path() -> Path:
+    """Single-frame demo arrays of the run's dataset (make_bc_dataset.py / make_scripted_dataset.py)."""
+    return DATA_DIR / f"{OBS['dataset']}.npz"
+
+
+def dataset_info() -> dict:
+    path = data_path().with_suffix(".json")
+    return json.loads(path.read_text()) if path.is_file() else {}
+
+
+def val_episodes() -> set[int]:
+    """Held-out episodes: from the dataset's json, else Tony's split (45-49 of 50)."""
+    return set(dataset_info().get("val_episodes", range(45, 50)))
+
+
+def train_episodes() -> set[int]:
+    return set(dataset_info().get("train_episodes", range(45)))
 IDLE_DEG = 1.0  # leading frames whose command is within this of the measured arm count as idle
 
 
 def configure(history: int = 3, velocities: bool = True, action: str = "absolute",
               relative_scale: list | None = None, trim_idle: bool = False,
-              relative_base: str = "measured", resync: dict | None = None) -> None:
+              relative_base: str = "measured", resync: dict | None = None,
+              dataset: str = "sim-baseline", cube_xy_range: float = 0.0, cube_yaw_deg: float = 0.0) -> None:
     """``relative_base``/``resync``: how relative actions become targets (action_mapping.py).
-    Configs saved before these existed load as "measured", what those runs trained with."""
+    ``dataset``: demos the run trained on; ``cube_xy_range``/``cube_yaw_deg``: cube placement
+    (+- metres / degrees around the scene's cube spot), as in those demos.
+    Configs saved before these existed load with the old defaults, what those runs trained with."""
     OBS.update(history=history, velocities=velocities, action=action, relative_scale=relative_scale,
-               trim_idle=trim_idle, relative_base=relative_base, resync=resync)
+               trim_idle=trim_idle, relative_base=relative_base, resync=resync,
+               dataset=dataset, cube_xy_range=cube_xy_range, cube_yaw_deg=cube_yaw_deg)
 
 
 def load_config(model_path: Path) -> None:
@@ -68,7 +92,9 @@ def load_config(model_path: Path) -> None:
 
 def env_kwargs(**extra) -> dict:
     """The env configuration BC is trained for (and PPO must use): fixed cube, the run's action mode."""
-    kwargs = {"action_mode": OBS["action"], "image": True, "history": OBS["history"], "cube_xy_range": (0.0, 0.0),
+    xy = float(OBS["cube_xy_range"])
+    kwargs = {"action_mode": OBS["action"], "image": True, "history": OBS["history"], "cube_xy_range": (xy, xy),
+              "cube_yaw_range": float(np.deg2rad(OBS["cube_yaw_deg"])),
               "include_targets": False, "wrist": True, "include_velocities": OBS["velocities"]}
     if OBS["action"] == "relative":
         kwargs["relative_scale"] = OBS["relative_scale"]
@@ -113,7 +139,9 @@ class Demos:
         self.hist = np.stack([idx - np.minimum(frame, k) for k in range(history - 1, -1, -1)], axis=1)
         self.hist[self.is_perturbed] = idx[self.is_perturbed, None]
         self.device = device
-        self.image_device = torch.device("cpu") if perturbed is not None else device
+        # Large datasets (perturbed copies, or many scripted episodes) keep images in CPU memory.
+        big = perturbed is not None or n > 30_000
+        self.image_device = torch.device("cpu") if big else device
         self.states = torch.as_tensor(arrays["states"][:, state_columns()], device=device)
         # Camera key -> N,3,H,W uint8 frames.
         self.cameras = {
@@ -123,7 +151,7 @@ class Demos:
         first = (frame == 0) & ~self.is_perturbed
         self.starts = arrays["states"][first]  # first observation of each episode (normalized joints first)
         self.start_episode = self.episode[first]
-        val = np.isin(self.episode, list(VAL_EPISODES))
+        val = np.isin(self.episode, list(val_episodes()))
         if (val & self.is_perturbed).any():
             raise SystemExit("Perturbed data contains validation episodes")
 
@@ -267,6 +295,7 @@ def rollout_parallel(model: PPO, starts: list[np.ndarray], n_envs: int = 8, epis
     if fixed_factors is not None:
         kwargs["fixed_factors"] = fixed_factors
     venv = SubprocVecEnv([partial(So101PickPlaceEnv, **kwargs)] * n_envs)
+    venv.seed(1234)  # same cube placements (when the cube is randomized) at every evaluation
     results = []
     try:
         for c in range(0, len(starts), n_envs):
@@ -314,12 +343,15 @@ def full_eval(model: PPO, demos: Demos, run: Path | None, seed: int) -> dict:
     torch.backends.cudnn.deterministic = True   # repeatable inference: identical starts, identical outcomes
     torch.backends.cudnn.benchmark = False
     world = So101PickPlaceEnv(**env_kwargs()).world
-    val, train = VAL_EPISODES, set(range(45))
+    val, train = val_episodes(), sorted(train_episodes())
+    # Tony's 50 demos: 5 + 20 + 45 + 45. Larger datasets: at most 45 training episodes.
+    train = set(train[:: max(1, len(train) // 45)][:45])
+    copies = max(1, 20 // len(val))
     groups = {
-        "val_exact": start_poses(demos, world, val),                                # 5
-        "val_jitter3deg": start_poses(demos, world, val, 3.0, 4, seed),             # 20
-        "train_exact": start_poses(demos, world, train),                            # 45
-        "train_jitter3deg": start_poses(demos, world, train, 3.0, 1, seed + 1),     # 45
+        "val_exact": start_poses(demos, world, val),
+        "val_jitter3deg": start_poses(demos, world, val, 3.0, copies, seed),
+        "train_exact": start_poses(demos, world, train),
+        "train_jitter3deg": start_poses(demos, world, train, 3.0, 1, seed + 1),
     }
     world.close()
     if run is not None:  # one recorded episode for a visual check
@@ -350,7 +382,7 @@ def view(model: PPO, demos: Demos) -> None:
     import mujoco.viewer
 
     env = So101PickPlaceEnv(**env_kwargs())
-    starts = start_poses(demos, env.world, VAL_EPISODES, 0.0, 1, 0)
+    starts = start_poses(demos, env.world, val_episodes(), 0.0, 1, 0)
     k = 0
     obs, _ = env.reset(options={"joints": starts[k]})
     with mujoco.viewer.launch_passive(env.world.model, env.world.data) as viewer:
@@ -389,24 +421,28 @@ def main() -> None:
                         help="relative: motion from the measured joints; absolute: target positions")
     parser.add_argument("--trim-idle", action=argparse.BooleanOptionalAction, default=True,
                         help="drop each demonstration's leading idle frames (human not moving yet)")
+    parser.add_argument("--dataset", default="sim-baseline",
+                        help="outputs/bc_data/<name>.npz: sim-baseline (Tony's demos, old scene) or a "
+                             "make_scripted_dataset.py dataset (current scene)")
     parser.add_argument("--eval", type=Path, help="evaluate a saved BC model")
     parser.add_argument("--view", type=Path, help="watch a saved BC model from the validation starts")
     args = parser.parse_args()
-    if not DATA.is_file():
-        sys.exit(f"{DATA} missing: run make_bc_dataset.py first")
-
     prepare_mounted(rebuild=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if args.view or args.eval:
         load_config(args.view or args.eval)
     else:
-        configure(args.history, args.velocities, args.action, None, args.trim_idle)
+        configure(args.history, args.velocities, args.action, None, args.trim_idle, dataset=args.dataset)
+        layout = dataset_info().get("layout", {})  # cube placement of the demos (scripted datasets)
+        OBS.update(cube_xy_range=layout.get("cube_xy_m", 0.0), cube_yaw_deg=layout.get("cube_yaw_deg", 0.0))
+    if not data_path().is_file():
+        sys.exit(f"{data_path()} missing: run make_bc_dataset.py or make_scripted_dataset.py first")
     perturbed = None
     if args.perturbed and not (args.view or args.eval):
-        perturbed = DATA.with_name("sim-baseline-perturbed.npz")
+        perturbed = data_path().with_name(f"{OBS['dataset']}-perturbed.npz")
         if not perturbed.is_file():
             sys.exit(f"{perturbed} missing: run make_bc_dataset.py --perturb 3")
-    demos = Demos(DATA, device, perturbed=perturbed)
+    demos = Demos(data_path(), device, perturbed=perturbed)
     print(f"{len(demos.train_idx)} train / {len(demos.val_idx)} val frames on {device}")
 
     if args.view or args.eval:

@@ -77,7 +77,7 @@ def main() -> None:
     torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark = True, False
     train_bc.load_config(args.model)
     model = PPO.load(args.model, device="cuda" if torch.cuda.is_available() else "cpu")
-    starts = list(train_ppo.start_joints(train_ppo.demo_starts(), So101World(), set(range(45)))[::2][: args.episodes])
+    starts = list(train_ppo.start_joints(train_ppo.demo_starts(), So101World(), train_bc.train_episodes()))[::2][: args.episodes])
 
     nominal = probe(model, starts, None, 0.0)
     print(f"nominal: success {nominal[0]:.0%}  lifted {nominal[1]:.0%}  ({len(starts)} episodes)", flush=True)
