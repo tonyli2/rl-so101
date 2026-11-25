@@ -18,6 +18,12 @@ interrupted sweep resumes where it stopped; summary.md is rewritten after every 
     python factor_sweep.py                       # 500k checkpoints, all settings, all policies
     python factor_sweep.py --step 300000 --name step300k
     python factor_sweep.py --settings nominal lighting_dim_strong --policies main_nominal_s1
+    python factor_sweep.py --set scene2 --relative-base resync --name scene2_step500000
+
+Policy sets (--set): "main" = the old-scene main experiment (main_nominal_s*, main_randomized_cal_s*,
+BC resnet18_h1_dart_rel_e20_seed0_last); "scene2" = the measured-scene runs (scene2_nominal_s*,
+scene2_randomized_s*, BC scripted_v2) plus, when present, the delay-trained runs
+(scene2_delay_nominal_s*, scene2_delay_randomized_s*).
 """
 
 from __future__ import annotations
@@ -43,8 +49,15 @@ HERE = Path(__file__).parent
 PPO_OUT = HERE / "outputs" / "ppo"
 OUT = HERE / "outputs" / "sweeps"
 BC = HERE / "outputs" / "bc" / "resnet18_h1_dart_rel_e20_seed0_last" / "bc_model.zip"
+SETS = {
+    "main": (BC, (("nominal", "main_nominal_s"), ("randomized", "main_randomized_cal_s"))),
+    "scene2": (HERE / "outputs" / "bc" / "scripted_v2_resnet18_h1_rel_e20" / "bc_model.zip",
+               (("nominal", "scene2_nominal_s"), ("randomized", "scene2_randomized_s"),
+                ("delay_nominal", "scene2_delay_nominal_s"), ("delay_randomized", "scene2_delay_randomized_s"))),
+}
+CONDITIONS = ("bc", "nominal", "randomized", "delay_nominal", "delay_randomized")
 N_LIGHTS = 2  # the scene's directional lights (checked against the model at start-up)
-SURFACES = ("table", "floor", "wall")
+SURFACES = ("table", "floor", "wall", "paper")  # paper: the measured scene's enclosure
 
 
 def texture(index: int, tint: float = 0.0) -> dict:
@@ -99,6 +112,16 @@ SETTINGS: dict[str, tuple[str, str, dict]] = {
     "actuator_latency_1": ("actuator", "moderate", {"actuator": {"latency_steps": 1}}),
     "actuator_latency_2": ("actuator", "strong", {"actuator": {"latency_steps": 2}}),
     "actuator_latency_3": ("actuator", "measured", {"actuator": {"latency_steps": 3}}),  # real arm ~2.3-3.3
+    # Sensing + command delay (command A, joint readings J, camera frames I steps): the real loop
+    # is ~76-110 ms before inference, 2.3-3.3 steps of 33 ms.
+    "delay_111": ("delay", "moderate", {"actuator": {"latency_steps": 1, "obs_latency_steps": 1,
+                                                     "image_latency_steps": 1}}),
+    "delay_222": ("delay", "measured", {"actuator": {"latency_steps": 2, "obs_latency_steps": 2,
+                                                     "image_latency_steps": 2}}),
+    "delay_212": ("delay", "measured", {"actuator": {"latency_steps": 2, "obs_latency_steps": 1,
+                                                     "image_latency_steps": 2}}),
+    "delay_333": ("delay", "strong", {"actuator": {"latency_steps": 3, "obs_latency_steps": 3,
+                                                   "image_latency_steps": 3}}),
     "actuator_combined": ("actuator", "combined", {"actuator": {"torque_scale": 0.7, "kp_scale": 0.7,
                                                                 "latency_steps": 1}}),
     "combined_moderate": ("combined", "moderate", {
@@ -110,10 +133,11 @@ SETTINGS: dict[str, tuple[str, str, dict]] = {
 }
 
 
-def policies(step: int) -> dict[str, tuple[str, int | None, Path]]:
+def policies(step: int, policy_set: str = "main") -> dict[str, tuple[str, int | None, Path]]:
     """name -> (condition, seed, checkpoint). Runs without that checkpoint are skipped."""
-    out: dict = {"bc": ("bc", None, BC)}
-    for cond, prefix in (("nominal", "main_nominal_s"), ("randomized", "main_randomized_cal_s")):
+    bc, runs = SETS[policy_set]
+    out: dict = {"bc": ("bc", None, bc)}
+    for cond, prefix in runs:
         for seed in (1, 2, 3):
             path = PPO_OUT / f"{prefix}{seed}" / f"model_{step}.zip"
             if path.is_file():
@@ -153,13 +177,17 @@ def summarize(rows: list[dict], path: Path) -> None:
     by = {}
     for r in rows:
         by.setdefault(r["setting"], {}).setdefault(r["condition"], []).append(r)
-    lines = ["| setting | factor | level | BC | nominal PPO (mean [seeds]) | randomized PPO (mean [seeds]) |",
-             "|---|---|---|---|---|---|"]
+    conds = [c for c in CONDITIONS if any(r["condition"] == c for r in rows)]
+    title = {"bc": "BC", "nominal": "nominal PPO", "randomized": "randomized PPO",
+             "delay_nominal": "delay-trained PPO", "delay_randomized": "delay + randomized PPO"}
+    lines = ["| setting | factor | level | " + " | ".join(title[c] + ("" if c == "bc" else " (mean [seeds])")
+                                                     for c in conds) + " |",
+             "|---|---|---|" + "---|" * len(conds)]
     for name, (factor, level, _) in SETTINGS.items():
         if name not in by:
             continue
         cells = []
-        for cond in ("bc", "nominal", "randomized"):
+        for cond in conds:
             rs = sorted(by[name].get(cond, []), key=lambda r: r["seed"] or 0)
             if not rs:
                 cells.append("-")
@@ -178,6 +206,7 @@ def main() -> None:
     parser.add_argument("--name", help="output folder under outputs/sweeps (default step<N>)")
     parser.add_argument("--settings", nargs="+", choices=list(SETTINGS), help="subset of settings")
     parser.add_argument("--policies", nargs="+", help="subset of policies (bc, main_nominal_s1, ...)")
+    parser.add_argument("--set", default="main", choices=list(SETS), help="which experiment's policies")
     parser.add_argument("--n-envs", type=int, default=8)
     parser.add_argument("--episodes", type=int, help="use only the first N of the 40 starts (smoke tests)")
     parser.add_argument("--relative-base", choices=("measured", "command", "resync"), default="measured",
@@ -189,7 +218,7 @@ def main() -> None:
     prepare_mounted(rebuild=True)
     torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark = True, False
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    train_bc.load_config(BC)  # every PPO run shares the BC observation/action settings
+    train_bc.load_config(SETS[args.set][0])  # every PPO run shares the BC observation/action settings
     world = So101World()
     if world.model.nlight != N_LIGHTS or int(world.model.light_type[0]) != 1:  # 1 = directional
         sys.exit(f"sweep lighting assumes {N_LIGHTS} lights with the directional sun first; "
@@ -197,7 +226,7 @@ def main() -> None:
     groups = train_ppo.eval_starts(train_ppo.demo_starts(), world)  # the same 40 starts as training evals
     starts = [q for g in groups.values() for q in g][: args.episodes]
 
-    pols = policies(args.step)
+    pols = policies(args.step, args.set)
     if args.policies:
         pols = {k: v for k, v in pols.items() if k in args.policies}
     settings = {k: v for k, v in SETTINGS.items() if not args.settings or k in args.settings}
