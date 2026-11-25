@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import mujoco
 import numpy as np
+from mounts.enclosure import update_paper_scene
 
 from .archive import (
     load_episode_archive,
@@ -80,7 +81,7 @@ def _joint_state(model, data):
 def _observation(model, data, renderer, metadata):
     images = {}
     for key, name in metadata["camera_map"].items():
-        renderer.update_scene(data, camera=name)
+        update_paper_scene(renderer, model, data, name)
         images[key] = renderer.render().copy()
     return {"agent_pos": _joint_state(model, data), "pixels": images}
 
@@ -180,7 +181,7 @@ def validate(root: Path, episode=None, *, compare_images=False, allow_pending=Fa
                     if not np.isfinite(image).all():
                         raise ValueError(f"Camera {key} has non-finite pixels")
                     if renderer is not None:
-                        renderer.update_scene(data, camera=name)
+                        update_paper_scene(renderer, model, data, name)
                         reference = renderer.render()
                         # MP4 is lossy; report the difference, do not require pixel identity.
                         errors[key].append(
@@ -222,6 +223,7 @@ def replay(root: Path, episode=None, *, mode="states", headless=False, tolerance
                 from mujoco import viewer as viewer_module
 
                 viewer = viewer_module.launch_passive(model, data)
+                viewer.opt.geomgroup[5] = 1
             maximum_error = 0.0
             replayed = 0
             for index in range(manifest["transition_count"]):

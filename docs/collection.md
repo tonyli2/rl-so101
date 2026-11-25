@@ -1,5 +1,65 @@
 # Demonstration collection
 
+## First demonstration in the updated scene
+
+Collection defaults to the measured fixed cube/bin positions. First collect one
+successful demonstration into a separate bootstrap dataset:
+
+```bash
+conda activate lerobot
+cd ~/code/enph576/lerobot-tabletop
+python record_demonstrations.py --fixed-layout --root recordings/sim-bootstrap-1 \
+  --leader-port /dev/ttyACM0 --episodes 1
+```
+
+After reviewing and saving that episode, use it as the IK reference for a new
+randomized dataset. Do not resume the fixed dataset in randomized mode.
+
+## Randomized cube/bin collection (explicit opt-in)
+
+```bash
+conda activate lerobot
+cd ~/code/enph576/lerobot-tabletop
+python record_demonstrations.py --root recordings/sim-varying-1 --randomize-layout \
+  --layout-reference recordings/sim-bootstrap-1 \
+  --leader-port /dev/ttyACM0 --calibration-file calibration/leader.json \
+  --episodes 50
+```
+
+With `--randomize-layout`, real-leader sessions randomize task positions on initial preview and each
+reset, save, or discard. The cube is sampled within +/-4 cm in world X/Y.
+The bin is sampled 0–4 cm away and +/-4 cm sideways relative to the original
+cube-to-bin direction. Positions remain fixed during the episode, except for
+normal cube physics. You choose the arm starting pose before pressing S.
+Rejection sampling excludes overlapping/nearby cube/bin layouts (1 cm clearance
+beyond conservative footprints), table-edge violations, and layouts without
+verified approach/release IK endpoints. Endpoint checks do not prove a feasible
+collision-free path. Rejection changes the accepted distribution from uniform.
+
+The overhead camera must see at least 16 segmented cube pixels with a 2-pixel
+frame margin. This is checked during sampling and again at S after the arm has
+moved; moving the arm out of the way can clear an occlusion. If preview motion
+pushes the cube more than 2 mm from its sampled XY position, reset before starting.
+Robot contact with cube/bin at S also blocks recording. The usual self-collision
+gate still checks every physics step throughout recording.
+
+The sampler reuses existing endpoint IK and demonstrated reference poses from
+episode 0 of `recordings/sim-bootstrap-1`; override with `--layout-reference PATH`.
+This bootstrap is used only for IK initialization, not copied into the randomized
+training dataset. Reference poses are interpreted in their archived model.
+Camera parameters, action units, and control frequency are unchanged. Each saved
+episode includes layout parameters, positions, RNG state, and endpoint witnesses;
+its scene snapshot contains the moved fixed bin and its state archive contains
+the cube pose. `--seed` selects a reproducible sampler stream; resumed sessions
+incorporate their existing episode count, rather than restarting at layout zero.
+
+Use a separate dataset for randomized collection. Resume with the same command
+plus `--resume`. Mixing fixed and randomized episodes is refused by the CLI.
+For legacy fixed-layout collection, explicitly pass `--fixed-layout`, including
+for an intentionally fixed-layout dataset. Keep the historical archive unchanged. Synthetic tests remain fixed unless
+using the session API to explicitly supply a sampler.
+
+
 The collection format is independent of the later policy. It stores ordinary
 single-step observations/actions in a native LeRobot dataset, plus a numerical
 MuJoCo archive for replay and camera re-rendering. ACT chunks, BC normalization,
@@ -32,7 +92,7 @@ demonstrations at the intended dataset resolution.
 ## Collect with the real leader
 
 ```bash
-python record_demonstrations.py --root recordings/sim-baseline \
+python record_demonstrations.py --fixed-layout --root recordings/sim-fixed-new \
   --leader-port /dev/ttyACM0 --calibration-file calibration/leader.json \
   --episodes 3
 ```
@@ -80,7 +140,7 @@ the active unaccepted attempt and preserves already finalized episodes.
 To append more episodes, repeat the same command with `--resume`:
 
 ```bash
-python record_demonstrations.py --root recordings/sim-baseline --resume \
+python record_demonstrations.py --fixed-layout --root recordings/sim-fixed-new --resume \
   --leader-port /dev/ttyACM0 --calibration-file calibration/leader.json \
   --episodes 3
 ```
@@ -209,7 +269,7 @@ The baseline archives require MuJoCo **3.17.0**, which is pinned in
 **0.6.2**. Historical setup snapshots describe earlier installations, not
 necessarily the runtime used for these demonstrations.
 
-The initial `recordings/sim-baseline` collection contains 50 accepted episodes
+The initial `recordings/archive/sim-baseline` collection contains 50 accepted episodes
 and 26,006 frames at 30 Hz (640×480 overhead and wrist images). This is a local
 snapshot of collection progress, not a training/evaluation split or a claim of
 policy success. Training has not been implemented here.
@@ -218,3 +278,48 @@ Recordings are ignored by Git. A code commit or GitHub push does **not** back up
 the dataset. Preserve the entire dataset directory, including `sim_archive/`,
 when making a separate data backup. Existing scene snapshots retain the model
 and source code used at collection time even if the working code changes.
+
+## Self-collision rejection
+
+Collection now checks MuJoCo contacts between nonadjacent robot bodies at every
+physics substep, including the initial pose and the final refreshed state. A
+colliding pose cannot start recording. If contact occurs while recording, the
+attempt is automatically discarded, its pending marker/buffer is cleared, and
+the preview reports REJECTED with the contacting body names. Move the leader
+clear or reset, then start another attempt. Expected gripper-cube and cube-table
+contacts are allowed. A successful placement alone cannot override this gate.
+
+After quarantine, 32 accepted episodes remained; 18 clean replacements have
+since restored the fixed-layout baseline to 50. See
+[dataset quarantine](dataset-quarantine.md). Reindexed episode numbers differ
+from historical videos. Do not resume collection into the quarantine folder.
+
+## Upright contact rejection
+
+The mounted scene now has one collision box for the main straight upright;
+flat adapter/base parts remain visual-only and robot mounting height is unchanged.
+The existing recording gate rejects robot contact with
+`overhead_upright_collision` before Start and at all physics substeps, including
+contacts that clear before the next camera frame. A rejected active attempt is
+discarded and cannot be kept; the preview reports `Upright collision` and the
+contacting bodies. Move clear or reset before retrying. Normal gripper–cube and
+cube–table/bin contacts remain allowed. Saved episode metadata records whether
+the upright check was present and passed. Older scene archives without this box
+are not retroactively certified. No PPO penalty or runtime RL contact flag is
+introduced by this change.
+
+## Curtain contacts and inspection transparency
+
+The white paper enclosure uses the dimensions in [simulation.md](simulation.md).
+Recorded overhead/wrist images and replay/re-rendered sensor images see opaque
+curtains. The extra four inspection views, including the modified display-only
+top view, show translucent curtains. Display alpha never modifies shared model
+parameters or collision behaviour. Cube visibility is checked with opaque curtains.
+
+Arm contact with any curtain rejects/discards the recording at the same internal
+physics cadence as the upright/self-contact checks; `Curtain collision (left)`,
+`(right)` or `(front)` identifies the obstacle. Normal task-object/table contacts
+are still allowed. Accepted episode metadata records the curtain check. New
+fixed panels change the scene version; old recordings are not retroactively
+certified for these obstacles. Legacy data can supply IK seed poses in their own
+archived coordinate frame, without restoring those states into a changed model.

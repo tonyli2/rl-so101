@@ -160,6 +160,12 @@ def configure_wrist(arm_root: ET.Element, asset_path: Path, config=None) -> dict
         quat=_text(camera_quat),
         fovy=str(config.get("fovy", 61)),
     )
+    if "intrinsics_640x480" in config:
+        from .cameras import apply_intrinsics
+
+        apply_intrinsics(
+            body.find("camera[@name='wrist_cam']"), config["intrinsics_640x480"]
+        )
     return {
         "source_revision": SOURCE_REVISION,
         "source_path": SOURCE_PATH,

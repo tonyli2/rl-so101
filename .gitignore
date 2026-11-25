@@ -18,3 +18,5 @@ recordings/
 
 # so101_rl training runs, checkpoints, check reports
 so101_rl/outputs/
+# Local policies, evaluation videos and training logs
+outputs/

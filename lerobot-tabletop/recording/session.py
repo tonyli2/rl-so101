@@ -1,6 +1,7 @@
 """Small simulation collection lifecycle around the native LeRobot writer."""
 
 import json
+import logging
 import time
 import uuid
 from pathlib import Path
@@ -21,6 +22,11 @@ from .schema import (
     create_dataset,
     learning_frame,
 )
+from .self_collision import (
+    RecordingCollisionChecker,
+    SelfCollisionError,
+    collision_message,
+)
 
 
 class RecordingSession:
@@ -33,8 +39,11 @@ class RecordingSession:
         seed=0,
         resume=False,
         source="real_leader",
+        layout_factory=None,
     ):
         self.simulation = simulation
+        self.layout = None
+        self._layout_factory = layout_factory
         self.root = Path(root).expanduser().resolve()
         self.repo_id = repo_id
         self.seed = seed
@@ -45,6 +54,12 @@ class RecordingSession:
         self.review = False
         self.invalid = False
         self._resume = resume
+        self.rejection_reason = None
+        self.self_collision = None
+        self._collision_checker = None
+        self._prior_physics_observer = getattr(
+            simulation, "physics_step_callback", None
+        )
         if self.root.exists() and not resume:
             raise FileExistsError(
                 f"Output exists: {self.root}; use a new root or --resume"
@@ -52,6 +67,18 @@ class RecordingSession:
         if resume:
             self._check_resume()
         try:
+            simulation.physics_step_callback = self._observe_physics_step
+            if self._layout_factory is not None:
+                self.layout = self._layout_factory(
+                    self.world,
+                    (
+                        json.loads((self.root / "meta/info.json").read_text())[
+                            "total_episodes"
+                        ]
+                        if resume
+                        else 0
+                    ),
+                )
             self._open_writer()
             self.reset()
         except BaseException:
@@ -59,6 +86,10 @@ class RecordingSession:
             raise
 
     def _check_resume(self):
+        if (self.root / "QUARANTINED.json").exists():
+            raise ValueError(
+                "Cannot append demonstrations to a quarantined dataset; use the active collection root"
+            )
         from .replay import check_append_metadata
 
         # Saved episodes were decoded and validated when Keep committed them.
@@ -94,13 +125,43 @@ class RecordingSession:
         if self.active or self.review:
             self.discard()
         self.observation, _ = self.simulation.reset(seed=self.seed)
+        if self.layout is not None:
+            self.layout.sample()
+            self.observation = self.simulation._obs(self.world)
+        self.self_collision = None
+        self.rejection_reason = None
         self.observation_wall = time.monotonic()
+
+    def _observe_physics_step(self, model, data):
+        if self._prior_physics_observer is not None:
+            self._prior_physics_observer(model, data)
+        if self.active and self.self_collision is None:
+            self.self_collision = self._checker().check(data)
+
+    def _checker(self):
+        if self._collision_checker is None:
+            self._collision_checker = RecordingCollisionChecker(self.world.model)
+        return self._collision_checker
 
     def begin(self):
         if self.active or self.review:
             raise RuntimeError(
                 "Finish/save/discard the current attempt before starting another"
             )
+        if self.layout is not None:
+            reason = self.layout.validate_start()
+            if reason:
+                self.rejection_reason = reason
+                raise SelfCollisionError(reason)
+        contact = self._checker().check(self.world.data)
+        if contact is not None:
+            self.self_collision = contact
+            self.rejection_reason = collision_message(contact)
+            raise SelfCollisionError(
+                self.rejection_reason + "; move clear or reset before recording"
+            )
+        self.self_collision = None
+        self.rejection_reason = None
         if self.dataset._is_finalized:
             self._open_writer()
         self.scene_id = snapshot_scene(self.world, self.root)
@@ -139,6 +200,22 @@ class RecordingSession:
         observation, reward, terminated, truncated, info = self.simulation.step(raw)
         completed_wall = time.monotonic()
         self.observation, self.observation_wall = observation, completed_wall
+        # mj_step contacts describe the state evaluated during integration.
+        # The environment's final mj_forward also exposes a new contact formed
+        # at the very last substep, before any frame can be accepted or saved.
+        if self.active and self.self_collision is None:
+            self.self_collision = self._checker().check(self.world.data)
+        if self.active and self.self_collision is not None:
+            contact = self.self_collision
+            self.discard()
+            self.self_collision = contact
+            self.rejection_reason = collision_message(contact)
+            logging.warning(
+                "Recording discarded: %s. Move clear or reset, then start again.",
+                self.rejection_reason,
+            )
+            if contact.get("kind") not in ("upright", "curtain"):
+                info["recording_rejected_self_collision"] = contact
         if self.active:
             try:
                 action, controls = applied_action(self.world)
@@ -175,6 +252,10 @@ class RecordingSession:
         self.active, self.review = False, True
 
     def save(self, outcome="success", *, annotation="human_confirmed"):
+        if self.rejection_reason is not None:
+            raise SelfCollisionError(
+                self.rejection_reason + "; this attempt was discarded"
+            )
         if not self.review or self.invalid or self.length == 0:
             raise RuntimeError("Only a finished, nonempty, valid attempt can be saved")
         check_encoder(self.dataset)
@@ -189,6 +270,9 @@ class RecordingSession:
             "clipped": np.asarray(self.clipped, dtype=bool),
         }
         metadata = {
+            "layout_randomization": self.layout.current
+            if self.layout is not None
+            else None,
             "repo_id": self.repo_id,
             "camera_map": dict(CAMERAS),
             "height": self.simulation.height,
@@ -213,6 +297,23 @@ class RecordingSession:
                 "simulation_and_writer_overrun",
             ],
             "policy_eligible": self.source == "real_leader" and outcome == "success",
+            "upright_collision_check": {
+                "version": 1,
+                "enabled": self._checker().upright_geom is not None,
+                "passed": self._checker().upright_geom is not None,
+                "physics_substeps": True,
+            },
+            "curtain_collision_check": {
+                "version": 1,
+                "enabled": bool(self._checker().curtain_geoms),
+                "passed": bool(self._checker().curtain_geoms),
+                "physics_substeps": True,
+            },
+            "self_collision_check": {
+                "version": 1,
+                "passed": True,
+                "physics_substeps": True,
+            },
         }
         write_episode_archive(
             self.root,
@@ -251,6 +352,9 @@ class RecordingSession:
             if self.active or self.review or self.invalid:
                 self.discard()
         finally:
+            self.simulation.physics_step_callback = self._prior_physics_observer
+            if self.layout is not None:
+                self.layout.close()
             if self.dataset is not None:
                 self.dataset.finalize()
 

@@ -110,7 +110,11 @@ def main():
             overview.distance = 1.25
             overview.azimuth = 180
             overview.elevation = -20
-            world.renderer.update_scene(world.data, camera=overview)
+            from mounts.enclosure import update_paper_scene
+
+            update_paper_scene(
+                world.renderer, world.model, world.data, overview, inspection=True
+            )
             Image.fromarray(world.renderer.render().copy()).save(
                 output / "overview.png"
             )
@@ -122,6 +126,7 @@ def main():
             import mujoco.viewer
 
             with mujoco.viewer.launch_passive(world.model, world.data) as viewer:
+                viewer.opt.geomgroup[5] = 1
                 if args.scene == "mounted":
                     viewer.cam.lookat[:] = [0.08, 0.04, 0.24]
                     viewer.cam.distance = 1.25

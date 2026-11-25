@@ -377,7 +377,13 @@ class SO101Env(gym.Env):
         if not np.isfinite(action).all():
             raise ValueError("Action must contain only finite values")
         world.data.ctrl[world.actuators] = world.to_ctrl(action)
-        mujoco.mj_step(world.model, world.data, nstep=world.substeps)
+        observer = getattr(self, "physics_step_callback", None)
+        if observer is None:
+            mujoco.mj_step(world.model, world.data, nstep=world.substeps)
+        else:
+            for _ in range(world.substeps):
+                mujoco.mj_step(world.model, world.data)
+                observer(world.model, world.data)
         # mj_step advances qpos/qvel, but derived body/camera transforms can
         # still describe the preceding substep. Observations must be aligned.
         mujoco.mj_forward(world.model, world.data)

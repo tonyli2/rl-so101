@@ -2,7 +2,12 @@
 
 Control a simulated SO-101 follower with a calibrated real leader, then collect
 pick-and-place demonstrations for imitation learning. The mounted task uses one
-red cube, a black bin, and overhead/wrist cameras. Policy training is next.
+red cube, a grey PLA bin, and overhead/wrist cameras. Train ACT locally and evaluate
+saved policies in the same mounted scene.
+
+**Before sim-to-real:** [verify real/sim camera agreement first](docs/sim2real.md).
+Wrist mounting position/tilt remain CAD estimates; applying measured intrinsics
+is not physical validation. This is a known open transfer-error source.
 
 ## Run
 
@@ -13,9 +18,9 @@ cd ~/code/enph576/lerobot-tabletop
 # Explore the scene; add --leader-port /dev/ttyACM0 for leader control.
 python launch_tabletop.py
 
-# Append to the existing local baseline (omit --resume for a new dataset).
-python record_demonstrations.py --root recordings/sim-baseline --resume \
-  --leader-port /dev/ttyACM0 --episodes 3
+# First collect one fixed-layout demonstration in the updated scene.
+python record_demonstrations.py --fixed-layout --root recordings/sim-bootstrap-1 \
+  --leader-port /dev/ttyACM0 --episodes 1
 ```
 
 The recorder opens one four-view window with buttons and keyboard controls:
@@ -24,6 +29,10 @@ wrist images are recorded. Do not run two programs against the same leader port.
 
 ## Guides
 
+- [Local ACT training, evaluation and Trackio](docs/training.md)
+- [Collision-aware collection and robustness evaluation](docs/robustness-evaluation.md)
+- [Share and archive datasets](docs/dataset-sharing.md)
+- [Dataset quarantine and original episode mappings](docs/dataset-quarantine.md)
 - [Collection, dataset format, validation and replay](docs/collection.md)
 - [Mounted scene, configuration, camera assumptions and asset sources](docs/simulation.md)
 - [Project goals, hardware and remaining sim-to-real work](docs/project.md)
@@ -42,7 +51,10 @@ wrist images are recorded. Do not run two programs against the same leader port.
 | `docs/` | Current project guides |
 | `archive/setup/` | Historical installation records |
 
-The local baseline contains 50 episodes / 26,006 frames. Recordings, generated
+The active local baseline contains 50 clean demonstrations: 32 retained after
+collision quarantine plus 18 newly collected replacements. The 18 original
+self-colliding episodes remain quarantined separately, and the original 50 are
+preserved in a historical backup. See the quarantine guide for mappings. Recordings, generated
 MJCF, caches and verification images stay outside Git. **Committing this code
 does not back up demonstrations**; preserve the full dataset directory separately.
 

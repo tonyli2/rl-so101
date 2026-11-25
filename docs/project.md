@@ -1,23 +1,32 @@
 # Project context
 
+**First sim-to-real check:** [rigorously validate both camera pipelines and
+physical alignment](sim2real.md). Wrist extrinsics remain CAD estimates; paired
+real/sim validation is still open.
+
 The goal is SO-101 pick-and-place learning in MuJoCo, followed by sim-to-real
 transfer. A calibrated physical SO-101 leader controls the simulated follower
 through LeRobot. The physical follower need not be connected for collection.
 
-The current task is a single red cube placed into a black bin, with fixed
+The current task is a single red PLA cube placed into a grey PLA bin, with fixed
 starting positions. Both printed mounts and the follower are black. The follower
-occupies the left base slot when viewed from the front; the right adapter is
+occupies the right base slot when viewed from the front; the left adapter is
 empty. The stock overhead and hex-nut wrist mounts use unmodified STL designs.
 See [scene assumptions and sources](simulation.md).
 
 Demonstrations store joint states/targets and two cameras in native LeRobot
 format, with MuJoCo states for replay and camera re-rendering. The initial local
-baseline has 50 accepted episodes. Next comes imitation learning; ACT, BC with a
-Gaussian policy, and later PPO/residual PPO remain possible consumers. No policy
-training or RL reward pipeline has been implemented yet.
+baseline has 50 accepted episodes, now archived at
+`lerobot-tabletop/recordings/archive/sim-baseline` for historical reproduction,
+not training against the updated scene. Next comes imitation learning; ACT, BC with a
+Gaussian policy, and later PPO/residual PPO remain possible consumers. Local ACT
+training and collision-aware evaluation are implemented; the RL training/reward
+pipeline remains future work.
 
-Real camera intrinsics/extrinsics, distortion, timing, and actuator/physics
-matching still need measurement before sim-to-real claims. Matching real cube
+Measured camera intrinsics and overhead pose are applied, with per-camera
+distortion values retained for real-image preprocessing. Wrist extrinsics, paired
+image validation, timing, and actuator/physics matching remain open before
+sim-to-real claims. Matching real cube
 and bin geometry to the scene reduces task differences but does not establish
 physical equivalence.
 
