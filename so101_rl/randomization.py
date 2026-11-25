@@ -83,6 +83,10 @@ class Ranges:
     # Control latency in 33 ms control steps, sampled uniformly from 0..this. Measured on the real
     # arm: camera ~26 ms + frame age 0-33 ms + servo dead time ~40-50 ms = ~76-110 ms (2.3-3.3 steps).
     latency_steps: int = 3
+    # Sensing delay (0 = off, the default): joint readings / camera frames this many steps old,
+    # sampled uniformly from 0..this, independently of the command latency above.
+    obs_latency_steps: int = 0
+    image_latency_steps: int = 0
     # Per-factor cap on strength (0-1), from the calibration pilot (calibrate_ranges.py): each
     # factor's ranges are scaled by curriculum strength x its cap.
     factor_strength: dict = field(default_factory=lambda: {"texture": 1.0, "lighting": 1.0,
@@ -165,6 +169,10 @@ class Randomizer:
         s = base * cap["actuator"]
         if "actuator" in factors:  # latency only (servo gain/torque changes barely mattered in the sweep)
             p["actuator"] = {"latency_steps": int(rng.integers(0, round(s * ranges.latency_steps) + 1))}
+            if ranges.obs_latency_steps:
+                p["actuator"]["obs_latency_steps"] = int(rng.integers(0, round(s * ranges.obs_latency_steps) + 1))
+            if ranges.image_latency_steps:
+                p["actuator"]["image_latency_steps"] = int(rng.integers(0, round(s * ranges.image_latency_steps) + 1))
         return p
 
     # --- applying -----------------------------------------------------------------------------

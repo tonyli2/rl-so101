@@ -1,0 +1,21 @@
+{
+  "source": "randomization_ranges_scene2.json + delays from the real-arm measurement",
+  "ranges": {
+    "factor_strength": {
+      "texture": 0.5,
+      "lighting": 0.25,
+      "camera": 0.75,
+      "friction": 0.75,
+      "actuator": 1.0
+    },
+    "wrist_pos_m": 0.01,
+    "wrist_rot_deg": 4.0,
+    "wrist_fovy_deg": 3.0,
+    "latency_steps": 2,
+    "obs_latency_steps": 2,
+    "image_latency_steps": 2
+  },
+  "rationale": {
+    "delays": "real arm 76-110 ms before computation = 2.3-3.3 steps of 33 ms: camera ~26 ms + frame age 0-33 ms (frames 0-2 steps late), servo dead time ~50 ms + inference (commands 0-2 steps late); joint readings 0-2 steps late per the team's report. Each sampled uniformly and independently per episode, ramped in by the curriculum."
+  }
+}

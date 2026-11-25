@@ -201,6 +201,12 @@ def main() -> None:
                              "fraction of --steps (0 = full strength from the start)")
     parser.add_argument("--eval-latency", type=int, nargs="*", default=[], metavar="STEPS",
                         help="also evaluate the 20 val starts under these fixed control latencies")
+    parser.add_argument("--eval-delay", nargs="*", default=[], metavar="A:J:I",
+                        help="also evaluate the val starts under fixed delays: command A, joint "
+                             "readings J, camera frames I steps (e.g. 2:2:1)")
+    parser.add_argument("--relative-base", choices=("measured", "command", "resync"),
+                        help="train with this action mapping (default: the BC config's); saved in the "
+                             "run's bc_config.json, so deployment uses it too")
     parser.add_argument("--train-encoder", action="store_true",
                         help="also fine-tune the encoder heads (shared with the new critic, whose early "
                              "gradients can disturb the actor's features); default keeps them at BC")
@@ -209,6 +215,8 @@ def main() -> None:
     prepare_mounted(rebuild=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_bc.load_config(args.bc)  # BC's observation/action settings define the env
+    if args.relative_base:
+        train_bc.OBS["relative_base"] = args.relative_base
     run = OUT / args.run_name
     run.mkdir(parents=True, exist_ok=True)
     (run / "ppo_config.json").write_text(json.dumps(
@@ -257,6 +265,11 @@ def main() -> None:
     history: list = []
     stress = {f"latency{k}": (evals["val_exact"] + evals.get("val_jitter3deg", []), {"actuator": {"latency_steps": k}})
               for k in args.eval_latency}
+    for spec in args.eval_delay:
+        a, j, i = (int(x) for x in spec.split(":"))
+        stress[f"delay{a}{j}{i}"] = (evals["val_exact"] + evals.get("val_jitter3deg", []),
+                                     {"actuator": {"latency_steps": a, "obs_latency_steps": j,
+                                                   "image_latency_steps": i}})
     eval_cb = EvalCallback(evals, run, args.eval_every, history, OUT / "tb" / f"{args.run_name}_eval", stress)
     eval_cb.init_callback(model)
     eval_cb.evaluate(0)  # the BC policy itself, same episodes: the bar PPO has to clear

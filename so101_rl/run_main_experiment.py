@@ -17,7 +17,8 @@ run's success-vs-steps curve.
     python run_main_experiment.py --plan outputs/ppo/scene2_plan.json   # another experiment
 
 Optional plan keys: "randomize_ranges" (train_ppo.py --randomize-ranges file) and "extra_args"
-(list of further train_ppo.py arguments, e.g. ["--quick-eval"]).
+(list of further train_ppo.py arguments, e.g. ["--quick-eval"]); per run, "factors" (the
+--randomize factor names, default the four visual ones).
 """
 
 from __future__ import annotations
@@ -112,7 +113,7 @@ def main() -> None:
         if encoder == "train":
             cmd.append("--train-encoder")
         if run["randomize"]:
-            cmd.append("--randomize")
+            cmd += ["--randomize", *run.get("factors", [])]  # no names = the four visual factors
             if plan.get("randomize_ranges"):
                 cmd += ["--randomize-ranges", plan["randomize_ranges"]]
         cmd += [str(a) for a in plan.get("extra_args", [])]

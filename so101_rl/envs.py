@@ -364,6 +364,12 @@ class _So101TaskEnv(gym.Env):
         self._target_ctrl = self.home.copy()
         # Control latency (evaluation factor "actuator"): commands take effect this many steps late.
         self.action_latency = 0
+        # Sensing delay: the policy (and the action mapping) see joint readings obs_latency steps
+        # old and camera frames image_latency steps old, as when the hardware reports late.
+        self.obs_latency = 0
+        self.image_latency = 0
+        self._sensed: deque = deque(maxlen=8)  # (state, frame, wrist, qpos) per step, newest last
+        self.reported_q = self.home.copy()     # joint reading the policy last received
         # Relative actions -> targets (action_mapping.py, shared with the hardware runner). The base
         # ("measured" / "command" / "resync") is part of the run config, so loading a model's
         # bc_config.json selects it; see train_bc.env_kwargs.
@@ -413,6 +419,16 @@ class _So101TaskEnv(gym.Env):
             frame = self.world.render(self.camera, *self.image_size)
         if self.wrist:
             wrist = self.world.render(self.WRIST_CAMERA, *self.image_size)
+        if fresh:
+            self._sensed.clear()
+        self._sensed.append((state, frame, wrist, self.world.qpos.copy()))
+        if self.obs_latency or self.image_latency:  # report older readings / frames
+            past = lambda k: self._sensed[max(0, len(self._sensed) - 1 - k)]  # noqa: E731
+            state, q = past(self.obs_latency)[0], past(self.obs_latency)[3]
+            frame, wrist = past(self.image_latency)[1], past(self.image_latency)[2]
+            self.reported_q = q.copy()
+        else:
+            self.reported_q = self._sensed[-1][3].copy()
         streams = [(self._states, state), (self._frames, frame), (self._wrist_frames, wrist)]
         for buffer, item in streams:
             if item is None:
@@ -468,7 +484,8 @@ class _So101TaskEnv(gym.Env):
         if self.action_mode == "delta":
             self._target_ctrl = np.clip(self._target_ctrl + a * self.delta_scale, w.lo, w.hi)
         elif self.action_mode == "relative":
-            self._target_ctrl = self.mapper(a, w.qpos)
+            # The mapping sees the joint reading the policy saw (late when obs_latency > 0).
+            self._target_ctrl = self.mapper(a, self.reported_q if self.obs_latency else w.qpos)
         else:
             self._target_ctrl = w.lo + (a + 1) / 2 * (w.hi - w.lo)
         applied = self._target_ctrl
@@ -620,7 +637,10 @@ class So101PickPlaceEnv(_So101TaskEnv):
             self.last_factors = self._randomizer.sample(self.np_random, ranges, factors,
                                                         strength=getattr(self, "randomize_strength", 1.0))
         self._randomizer.apply(self.last_factors)
-        self.action_latency = int(self.last_factors.get("actuator", {}).get("latency_steps", 0))
+        act = self.last_factors.get("actuator", {})
+        self.action_latency = int(act.get("latency_steps", 0))
+        self.obs_latency = int(act.get("obs_latency_steps", 0))
+        self.image_latency = int(act.get("image_latency_steps", 0))
 
     def _reset_task(self) -> None:
         self._apply_randomization()
