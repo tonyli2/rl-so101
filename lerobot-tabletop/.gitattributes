@@ -51,3 +51,4 @@ robotstudio_so101/assets/wrist_roll_follower_so101_v1.stl filter=lfs diff=lfs me
 robotstudio_so101/assets/wrist_roll_pitch_so101_v2.stl filter=lfs diff=lfs merge=lfs -text
 media/cameras.png filter=lfs diff=lfs merge=lfs -text
 textures/wood.png filter=lfs diff=lfs merge=lfs -text
+recordings/real-pickplace-1/videos/**/*.mp4 filter=lfs diff=lfs merge=lfs -text
