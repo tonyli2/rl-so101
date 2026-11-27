@@ -66,21 +66,35 @@ class CameraCalibrationTests(unittest.TestCase):
                     )
                     np.testing.assert_allclose(actual, expected, atol=0.0002, rtol=0)
 
-    def test_overhead_world_pose_matches_measured_frame_conversion(self):
+    def test_overhead_world_pose_matches_sim2real_refit(self):
+        refit = json.loads(
+            (ROOT / "mounts/calibration/overhead_extrinsics_refit.json").read_text()
+        )
+        cid = self.model.camera("overhead").id
+        np.testing.assert_allclose(
+            self.data.cam_xpos[cid], refit["world_position_m"], atol=1e-6
+        )
+        R = self.data.cam_xmat[cid].reshape(3, 3)
+        np.testing.assert_allclose(R[:, :2].T.reshape(-1), refit["xyaxes"], atol=1e-6)
+
+    def test_refit_records_the_replaced_charuco_conversion(self):
         source = json.loads(
             (ROOT / "mounts/calibration/overhead_extrinsics.json").read_text()
         )
         provenance = json.loads(
             (ROOT / "mounts/calibration/provenance.json").read_text()
         )
+        refit = json.loads(
+            (ROOT / "mounts/calibration/overhead_extrinsics_refit.json").read_text()
+        )
         expected = np.array(source["mujoco"]["pos"]) + np.array(
             provenance["calibration_world_to_current_world_translation_m"]
         )
-        cid = self.model.camera("overhead").id
-        np.testing.assert_allclose(self.data.cam_xpos[cid], expected, atol=1e-10)
-        R = self.data.cam_xmat[cid].reshape(3, 3)
         np.testing.assert_allclose(
-            R[:, :2].T.reshape(-1), source["mujoco"]["xyaxes"], atol=1e-10
+            refit["replaced"]["world_position_m"], expected, atol=1e-10
+        )
+        np.testing.assert_allclose(
+            refit["replaced"]["xyaxes"], source["mujoco"]["xyaxes"], atol=1e-10
         )
 
     def test_wrist_grasp_frame_is_below_image_centre_and_pose_stays_cad(self):

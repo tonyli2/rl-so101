@@ -9,7 +9,17 @@ failure solely to the policy, demonstration count, or training duration.
 ## Current camera status
 
 - Native image size: 640×480. Each camera uses its own measured fx, fy, cx, cy.
-- Overhead lens and optical pose: ChArUco measurements from branch
+- **Overhead optical pose, 2026-11-26 refit (current).** Paired real/sim checks showed the
+  ChArUco-derived pose below put the sim camera about 7 cm sideways and 5 cm forward of the
+  physical lens (real arm silhouette IoU about 0.09). The configured pose now puts the lens at its
+  photographed position (world 0.004, 0.116, 0.540 m: on the stand centreline, about 2.4 cm in
+  front of the column) with the rotation fitted to real arm silhouettes. Arm IoU is 0.71–0.72 over
+  33 frames from three sessions, two of them held out from the fit. Details and the replaced pose:
+  `lerobot-tabletop/mounts/calibration/overhead_extrinsics_refit.json`. The comparison tool is
+  `so101_rl/compare_overhead.py` on branch `kammy` (`--live` for a fresh frame). Likely root cause:
+  the board-to-follower offset the ChArUco calibration assumed. Policies and datasets rendered with
+  the old pose see a different overhead view.
+- Overhead lens and (replaced) optical pose: ChArUco measurements from branch
   `camera-calibration`, commit `0bb66e5c12d1cda55feff71389e3a3dace46478b`.
   The calibration used the physical follower on its current side. Board offsets
   are trusted: 205 mm forward, 20 mm left of the shoulder-pan axis, 5 mm above

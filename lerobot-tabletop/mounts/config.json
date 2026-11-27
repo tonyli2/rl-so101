@@ -2,7 +2,7 @@
   "_notes": [
     "Geometry assembly from stock mesh mating features; nominal camera and base poses require visual confirmation.",
     "World +X is forward into workspace, +Z up. Front observer at +X looking -X: left is -Y.",
-    "Measured 640x480 camera intrinsics and overhead pose applied from camera-calibration; wrist pose remains CAD-derived and requires sim2real validation.",
+    "Measured 640x480 camera intrinsics applied from camera-calibration. The overhead optical pose is the 2026-11-26 sim2real refit (mounts/calibration/overhead_extrinsics_refit.json): lens position from a side photo, rotation fitted to real arm silhouettes; the replaced ChArUco pose stays in overhead_extrinsics.json. Wrist pose remains CAD-derived and requires sim2real validation.",
     "Follower origin offset accounts for base visual footprint centre x=.021135 and bottom z=-.0024.",
     "Adapter registration retained by translating the follower from the front-view left adapter to the front-view right adapter; orientation unchanged."
   ],
@@ -122,17 +122,17 @@
   },
   "overhead_camera": {
     "pos": [
-      0.08621754231933076,
-      0.07003269344714787,
-      0.5355640142279104
+      0.0366695,
+      0.0,
+      0.54
     ],
     "xyaxes": [
-      -0.048140052372507354,
-      -0.9988034506746737,
-      0.008614074409772635,
-      0.9088183904508754,
-      -0.040221710380545346,
-      0.41524853665286293
+      0.04255316691441707,
+      -0.9989507860986346,
+      0.016927933674081658,
+      0.8955811763789405,
+      0.0456491682158226,
+      0.4425500084249429
     ],
     "fovy": 47.14552312300622,
     "pcb_pos": [
