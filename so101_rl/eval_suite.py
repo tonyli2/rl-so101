@@ -128,8 +128,11 @@ class SuiteRunner:
         geoms = [g for g in range(mine.ngeom) if mine.geom_bodyid[g] != marker]
         bodies = [i for i in range(mine.nbody) if i != marker]
         box = ref.body("box").id
+        # Camera poses are not compared: the suites were built before the 2026-11-26 overhead
+        # refit (mounts/calibration/overhead_extrinsics_refit.json) and images are rendered with
+        # this env's (current) cameras; only start states and bin positions come from the suite.
         checks = {"geom_size": geoms, "geom_pos": geoms, "geom_friction": geoms, "body_mass": bodies,
-                  "body_pos": bodies, "cam_pos": None, "cam_quat": None, "cam_fovy": None,
+                  "body_pos": bodies, "cam_fovy": None,
                   "actuator_gainprm": None, "actuator_biasprm": None, "dof_damping": None,
                   "dof_armature": None, "light_pos": None, "jnt_range": None}
         for field, keep in checks.items():
