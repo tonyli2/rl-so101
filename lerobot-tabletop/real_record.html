@@ -1,0 +1,202 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Real demo recorder</title>
+<style>
+  :root { --bg:#111; --panel:#1c1c1c; --fg:#eee; --mute:#999; --ok:#2ecc71; --bad:#ff6b6b; --rec:#e74c3c; --accent:#ffd400; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px system-ui, sans-serif; }
+  header { padding:10px 16px; display:flex; gap:16px; align-items:center; flex-wrap:wrap; border-bottom:1px solid #333; }
+  header b { font-size:18px; }
+  #msg { color:var(--mute); }
+  #err { color:var(--bad); padding:0 16px; }
+  .wrap { padding:12px 16px; }
+  .feeds { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+  .feeds figure { margin:0; background:#000; position:relative; }
+  .feeds img { width:100%; display:block; aspect-ratio:4/3; object-fit:contain; }
+  .feeds figcaption { position:absolute; top:6px; left:8px; background:rgba(0,0,0,.6); padding:2px 8px; border-radius:4px; font-weight:700; }
+  .row { display:grid; grid-template-columns: 1.3fr 1fr; gap:12px; margin-top:12px; }
+  .panel { background:var(--panel); border-radius:8px; padding:12px 14px; }
+  .panel h2 { margin:0 0 8px; font-size:15px; color:var(--mute); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+  .big { font-size:22px; font-weight:700; }
+  .target { font-size:18px; color:var(--accent); margin:6px 0; }
+  table { border-collapse:collapse; }
+  td { padding:3px 10px 3px 0; }
+  .btns { display:flex; gap:10px; flex-wrap:wrap; margin-top:10px; }
+  button { font:inherit; font-weight:700; font-size:17px; padding:12px 20px; border-radius:8px; border:0; cursor:pointer; }
+  button:disabled { opacity:.35; cursor:default; }
+  .start { background:var(--ok); color:#000; }
+  .save { background:#3498db; color:#fff; }
+  .discard { background:#555; color:#fff; }
+  .rest { background:#333; color:#fff; }
+  .stop { background:#222; color:var(--bad); border:1px solid var(--bad); }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+  .recdot { display:inline-block; width:12px; height:12px; border-radius:50%; background:var(--rec); margin-right:6px; animation:blink 1s infinite; }
+  @keyframes blink { 50% { opacity:.2; } }
+  .thumbs { display:flex; gap:10px; flex-wrap:wrap; }
+  .thumb { background:#000; padding:6px; border-radius:6px; }
+  .thumb img { width:320px; display:block; }
+  .bar { height:10px; background:#333; border-radius:5px; width:220px; overflow:hidden; display:inline-block; vertical-align:middle; }
+  .bar i { display:block; height:100%; background:var(--accent); }
+  kbd { background:#333; padding:1px 6px; border-radius:4px; }
+  @media (max-width: 900px) { .feeds, .row { grid-template-columns:1fr; } }
+</style>
+<header><b>Real demo recorder</b><span id="camstat"></span><span id="state"></span><span id="msg"></span></header>
+<div id="err"></div>
+
+<div class="wrap" id="setup" hidden>
+  <div class="panel">
+    <h2>1. Cameras</h2>
+    <p>Chrome opens the cameras (allow it if asked). Click which feed is the bird's-eye (overhead) camera and which is the wrist camera. Ignore the laptop camera.</p>
+    <div class="thumbs" id="thumbs">Looking for cameras...</div>
+  </div>
+  <div class="panel" style="margin-top:12px">
+    <h2>2. Which arm is the leader?</h2>
+    <p>Wiggle the <b>leader</b> arm (the one you hold). Its bar moves; click "This is the leader" next to it.</p>
+    <div id="ports"></div>
+  </div>
+  <div class="panel" style="margin-top:12px">
+    <h2>3. Connect</h2>
+    <p>Hold the leader in roughly the same pose as the follower first: on connect the follower moves to match the leader.</p>
+    <button class="start" id="connect">Connect</button> <span id="assign"></span>
+  </div>
+</div>
+
+<div class="wrap" id="run" hidden>
+  <div class="feeds">
+    <figure><img src="/overhead.mjpg" alt="overhead"><figcaption>Overhead &middot; yellow = where the cube goes</figcaption></figure>
+    <figure><img src="/wrist.mjpg" alt="wrist"><figcaption>Wrist</figcaption></figure>
+  </div>
+  <div class="row">
+    <div class="panel">
+      <h2>This episode</h2>
+      <div class="big" id="epi"></div>
+      <div>Place the cube <span class="target" id="ttext"></span></div>
+      <table id="ttable"></table>
+      <div id="cube" style="margin-top:6px"></div>
+      <div id="homehint" class="bad" style="margin-top:4px"></div>
+      <div class="btns">
+        <button class="start" id="bstart">Start <kbd>Space</kbd></button>
+        <button class="save" id="bsave">Save <kbd>Space</kbd></button>
+        <button class="discard" id="bdiscard">Discard <kbd>D</kbd></button>
+        <button class="rest" id="bhome">Cube is on the mark</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Reset checklist</h2>
+      <ol style="margin:0 0 8px 18px; padding:0">
+        <li>Arm back to the rest pose (all joints green)</li>
+        <li>Cube on the yellow outline (cross turns green)</li>
+        <li>Hands out of the cameras' view, then Start</li>
+      </ol>
+      <table id="rest"></table>
+      <div class="btns">
+        <button class="rest" id="brest">Set rest pose = current</button>
+        <button class="stop" id="bstop">Stop &amp; finish dataset</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let S = {};
+async function post(url){ const r = await fetch(url, {method:"POST"}); const j = await r.json(); if (j.result !== "ok") alert(j.result); refresh(); }
+const cmd = c => post("/cmd?c=" + c);
+$("bstart").onclick = () => cmd("start");
+$("bsave").onclick = () => cmd("save");
+$("bdiscard").onclick = () => { if (confirm("Discard this episode?")) cmd("discard"); };
+$("bhome").onclick = () => { if (confirm("Is the cube sitting exactly on your home mark, not rotated?")) cmd("sethome"); };
+$("brest").onclick = () => { if (confirm("Use the follower's current pose as the rest pose for every episode?")) cmd("setrest"); };
+$("bstop").onclick = () => { if (confirm("Stop recording and finish the dataset files?")) cmd("stop"); };
+$("connect").onclick = () => post("/connect");
+document.addEventListener("keydown", e => {
+  if (S.state === undefined || e.target.tagName === "INPUT") return;
+  if (e.code === "Space") { e.preventDefault(); if (S.state === "ready") cmd("start"); else if (S.state === "recording" || S.state === "review") cmd("save"); }
+  if (e.key === "d" && (S.state === "recording" || S.state === "review")) $("bdiscard").click();
+});
+let thumbsShown = "";
+function render(){
+  $("err").textContent = S.error || "";
+  const age = S.cam_age || {};
+  const fmt = n => age[n] == null ? `${n}: no frames` : age[n] < 0.3 ? `${n} ok` : `${n}: ${age[n]}s old`;
+  $("camstat").innerHTML = ["overhead", "wrist"].map(n => `<span class="${age[n] != null && age[n] < 0.3 ? "ok" : "bad"}">${fmt(n)}</span>`).join(" &middot; ")
+    + (document.hidden ? ' <b class="bad">keep this tab visible</b>' : "");
+  $("msg").textContent = S.message || "";
+  const setup = S.state === "setup" || S.state === "connecting";
+  $("setup").hidden = !setup; $("run").hidden = setup;
+  $("state").innerHTML = S.state === "recording" ? `<span class="recdot"></span>RECORDING ${S.seconds}s` : (S.state || "");
+  if (setup) {
+    const mx = Math.max(20, ...S.ports.map(p => p.motion));
+    $("ports").innerHTML = S.ports.map(p => `<div style="margin:6px 0">${p.port}
+      <span class="bar"><i style="width:${Math.min(100, 100 * p.motion / mx)}%"></i></span>
+      <button class="rest" onclick="post('/assign?leader=${encodeURIComponent(p.port)}')">This is the leader</button>
+      <b class="ok">${p.port === S.leader_port ? "leader" : p.port === S.follower_port ? "follower" : ""}</b></div>`).join("") || "No arms found (/dev/tty.usbmodem*).";
+    $("assign").textContent = `overhead: ${ROLE.overhead ? "set" : "?"}, wrist: ${ROLE.wrist ? "set" : "?"}, leader: ${S.leader_port ?? "?"}, follower: ${S.follower_port ?? "?"}`;
+    $("connect").disabled = S.state === "connecting";
+    return;
+  }
+  const done = !S.target;
+  $("epi").textContent = done ? `All ${S.total} episodes recorded` : `Episode ${S.episode + 1} of ${S.total}` + (S.saving ? " (saving previous...)" : "");
+  $("ttext").textContent = S.target_text || "";
+  if (S.target) {
+    const t = S.target;
+    $("ttable").innerHTML = `<tr><td>Forward / back</td><td><b>${t.forward_cm > 0 ? "+" : ""}${t.forward_cm.toFixed(1)} cm</b></td><td class="mute">+ = away from the arm</td></tr>
+      <tr><td>Left / right</td><td><b>${t.left_cm > 0 ? "+" : ""}${t.left_cm.toFixed(1)} cm</b></td><td>+ = left (seen from behind the arm)</td></tr>
+      <tr><td>Rotation</td><td><b>${t.yaw_deg > 0 ? "+" : ""}${t.yaw_deg.toFixed(0)}&deg;</b></td><td>+ = counter-clockwise from above</td></tr>`;
+  }
+  $("homehint").textContent = S.has_home ? "" : "Once: put the cube on your mark and click \"Cube is on the mark\" so offsets are measured from it.";
+  $("cube").innerHTML = S.cube ? (S.cube.includes("OK") ? `<b class="ok">${S.cube}</b>` : `<span class="bad">${S.cube}</span>`) : "";
+  const r = S.rest;
+  $("rest").innerHTML = !S.has_rest ? `<tr><td class="bad">No rest pose yet: put the arm in a comfortable folded pose and click "Set rest pose".</td></tr>`
+    : !r ? "" : Object.entries(r.diffs).map(([j, d]) => {
+        const tol = j === "gripper" ? 10 : 5;
+        return `<tr><td>${j}</td><td class="${Math.abs(d) <= tol ? "ok" : "bad"}">${d > 0 ? "+" : ""}${d.toFixed(1)}${j === "gripper" ? "" : "&deg;"}</td></tr>`; }).join("")
+      + `<tr><td colspan=2><b class="${r.ok ? "ok" : "bad"}">${r.ok ? "At rest pose" : "Not at rest pose yet"}</b></td></tr>`;
+  $("bstart").disabled = !(S.state === "ready" && !S.saving && !done);
+  $("bsave").disabled = $("bdiscard").disabled = !(S.state === "recording" || S.state === "review");
+  $("bstop").disabled = !(S.state === "ready");
+}
+// ---------------- cameras: opened here (Chrome has camera permission) and streamed to Python
+const ROLE = JSON.parse(localStorage.getItem("camRoles") || "{}");  // role -> deviceId
+const streams = {};   // deviceId -> {video, stream}
+async function openCams(){
+  try { (await navigator.mediaDevices.getUserMedia({video:true})).getTracks().forEach(t => t.stop()); } catch (e) {}
+  const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput" && !/facetime/i.test(d.label));
+  const box = $("thumbs"); box.innerHTML = devs.length ? "" : "No external cameras found. Plug them in and reload.";
+  for (const d of devs) {
+    let st;
+    try {
+      st = await navigator.mediaDevices.getUserMedia({video:{deviceId:{exact:d.deviceId}, width:{exact:640}, height:{exact:480}, resizeMode:"none", frameRate:{ideal:30}}});
+    } catch (e) { box.insertAdjacentHTML("beforeend", `<div class="thumb bad">${d.label}: ${e.name} (640x480 not available?)</div>`); continue; }
+    const v = document.createElement("video"); v.autoplay = v.muted = v.playsInline = true; v.srcObject = st; v.style.width = "320px";
+    streams[d.deviceId] = {video: v, stream: st};
+    const div = document.createElement("div"); div.className = "thumb"; div.appendChild(v);
+    div.insertAdjacentHTML("beforeend", `<div class="btns"><button class="rest" data-r="overhead">Overhead</button><button class="rest" data-r="wrist">Wrist</button><b class="ok" data-tag></b></div>`);
+    div.querySelectorAll("button").forEach(b => b.onclick = () => { const r = b.dataset.r; for (const k in ROLE) if (ROLE[k] === d.deviceId) delete ROLE[k]; ROLE[r] = d.deviceId; localStorage.setItem("camRoles", JSON.stringify(ROLE)); tagCams(); });
+    div.dataset.dev = d.deviceId; box.appendChild(div);
+  }
+  for (const k in ROLE) if (!streams[ROLE[k]]) delete ROLE[k];
+  tagCams();
+  for (const role of ["overhead", "wrist"]) pump(role);
+}
+function tagCams(){ document.querySelectorAll(".thumb[data-dev]").forEach(div => { const r = Object.keys(ROLE).find(k => ROLE[k] === div.dataset.dev); div.querySelector("[data-tag]").textContent = r || ""; }); }
+async function pump(role){
+  const c = document.createElement("canvas"); c.width = 640; c.height = 480; const g = c.getContext("2d");
+  let last = -1;
+  while (true) {
+    const s = streams[ROLE[role]];
+    if (!s || s.video.readyState < 2 || s.video.videoWidth !== 640) { await new Promise(r => setTimeout(r, 200)); continue; }
+    const t = s.video.currentTime;
+    if (t === last) { await new Promise(r => s.video.requestVideoFrameCallback ? s.video.requestVideoFrameCallback(r) : setTimeout(r, 10)); continue; }
+    last = t;
+    g.drawImage(s.video, 0, 0, 640, 480);
+    const blob = await new Promise(r => c.toBlob(r, "image/jpeg", 0.95));
+    try { await fetch(`/frame?cam=${role}`, {method: "POST", body: blob}); } catch (e) { await new Promise(r => setTimeout(r, 500)); }
+  }
+}
+openCams();
+
+async function refresh(){ try { S = await (await fetch("/status")).json(); render(); } catch (e) { $("msg").textContent = "Recorder not running."; } }
+setInterval(refresh, 300); refresh();
+</script>
