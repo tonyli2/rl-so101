@@ -1,0 +1,64 @@
+{
+  "name": "overhead",
+  "status": "sim2real refit; replaces the ChArUco-derived optical pose in config.overhead_camera",
+  "date": "2026-11-26",
+  "frame": "config.overhead_camera.pos/xyaxes are relative to the overhead_stand body (MuJoCo camera axes: x right, y up, looks along -z)",
+  "pos": [
+    0.0366695,
+    0.0,
+    0.54
+  ],
+  "xyaxes": [
+    0.04255316691441707,
+    -0.9989507860986346,
+    0.016927933674081658,
+    0.8955811763789405,
+    0.0456491682158226,
+    0.4425500084249429
+  ],
+  "world_position_m": [
+    0.004,
+    0.11603212,
+    0.54
+  ],
+  "world_view_direction": [
+    0.44285842489588845,
+    0.0036715656229845406,
+    -0.8965840368334745
+  ],
+  "replaced": {
+    "pos": [
+      0.08621754231933076,
+      0.07003269344714787,
+      0.5355640142279104
+    ],
+    "xyaxes": [
+      -0.048140052372507354,
+      -0.9988034506746737,
+      0.008614074409772635,
+      0.9088183904508754,
+      -0.040221710380545346,
+      0.41524853665286293
+    ],
+    "world_position_m": [
+      0.053548042319330774,
+      0.18606481344714787,
+      0.5355640142279104
+    ],
+    "source": "overhead_extrinsics.json (ChArUco, camera-calibration@0bb66e5) + provenance.json translation"
+  },
+  "method": [
+    "Lens position fixed from a side photo of the stand: about 2.4 cm in front of the column face, on the column centreline, about 2 cm below the column top (world x 0.004, y 0.116, z 0.540 after a 0.5 cm settle).",
+    "Rotation fitted by maximizing IoU between the real dark-arm silhouette and the sim arm segmentation over 14 static poses (so101_rl/sim2real_capture.py, run 20261126-211901), arm pose from the measured joints with the wrist-roll correction (run_real.SIM_MINUS_REAL_DEG)."
+  ],
+  "fit_quality_mean_arm_iou_160x120": {
+    "replaced_charuco_pose": 0.076,
+    "this_pose": 0.735,
+    "unconstrained_6dof_fit": 0.76
+  },
+  "notes": [
+    "The ChArUco result placed the camera 4.6 cm from the shoulder-pan axis sideways; the physical lens is about 11.6 cm from it (on the stand centreline). The board-to-follower offset assumed by that calibration (205 mm forward, 20 mm left) is the likely error; it was not re-measured.",
+    "Intrinsics (K, D) are unchanged; the visible PCB/lens proxy geoms are unchanged and already agree with the photo.",
+    "Policies and datasets rendered with the replaced pose see a different overhead view; retrain or fine-tune."
+  ]
+}
