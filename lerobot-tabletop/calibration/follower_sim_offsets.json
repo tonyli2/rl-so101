@@ -1,0 +1,40 @@
+{
+  "name": "follower_sim_offsets",
+  "date": "2026-11-26",
+  "convention": "offset = sim joint angle - real LeRobot reading (deg). Readings to sim: sim = real + offset. Sim targets to commands: real = sim - offset.",
+  "joints": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper"
+  ],
+  "sim_minus_real_deg": [
+    3.0,
+    -1.5,
+    -9.5,
+    0.0,
+    -80.5,
+    0.0
+  ],
+  "valid_for": {
+    "file": "lerobot-tabletop/calibration/follower.json",
+    "sha256_lf": "61f2a2dc5ee822bdfe189b213789d880dac3c22c44dfbc52d0759a0775b38a53",
+    "commit": "f7a4a806c41db41cbafaa1dc6ab6340ace048dee",
+    "note": "sha256 of the file with LF line endings. Recalibrating the follower changes these offsets: re-measure before using them."
+  },
+  "method": [
+    "Wrist roll: 9 roll poses compared with the real overhead arm silhouette; the sim matches at sim = real - 73 deg (4.8 deg RMS; the opposite sign fails).",
+    "All joints refined from two capture sessions (14 varied poses, 14 wrist-on-cube poses): fit to the overhead arm silhouette (with the refit overhead camera) and to the wrist camera's view of the cube and bin. Fitting one session and testing on the other raised the wrist cube IoU from 0.13-0.23 to 0.72-0.84.",
+    "A torque-off fingertip height check agrees within 3 mm at grasp reach."
+  ],
+  "confidence": {
+    "shoulder_pan": "agreed across both sessions",
+    "wrist_flex": "agreed across both sessions",
+    "wrist_roll": "agreed across both sessions (-80.5); the part beyond the first -73 estimate rests on the two-session fit",
+    "shoulder_lift_and_elbow_flex": "their sum (-11 deg) is well determined; the split between them is not",
+    "gripper": "not measured (0)"
+  },
+  "tools": "so101_rl/calib_poses.py, sim2real_capture.py, compare_objects.py, height_check.py and run_real.py on branch kammy"
+}
