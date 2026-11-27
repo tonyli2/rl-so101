@@ -35,17 +35,29 @@ INTRINSICS_DIR = ROOT / "lerobot-tabletop" / "mounts" / "calibration"
 NATIVE = (640, 480)  # width, height the intrinsics were measured at
 POLICY_SIZE = (128, 96)  # width, height
 FPS = 30
-# Sim joint angle minus real LeRobot reading, per joint (deg; gripper unused). Measured
-# 2026-11-26 with calib_poses.py --set roll: over 9 wrist-roll poses, the sim matches the real
-# overhead silhouette at sim_roll = real_roll - 73 deg (4.8 deg RMS; the opposite sign fails).
-# Refined 2026-11-26 from two capture sessions (sim2real_capture.py: 14 varied poses and 14
-# wrist-on-cube poses), fitting the overhead arm silhouette and the wrist camera's view of the
-# cube and bin (placed where the corrected overhead camera located them). Fitting either session
-# and testing on the other raised the wrist cube IoU from 0.13-0.23 to 0.72-0.84; pan (+3),
-# wrist flex (0) and roll (-80.5) agreed across sessions; lift and elbow trade off (their sum is
-# what is well determined). Observations are converted to the sim convention and commands back,
-# so the policy sees the joint angles it was trained with.
-SIM_MINUS_REAL_DEG = (3.0, -1.5, -9.5, 0.0, -80.5, 0.0)
+# Sim joint angle minus real LeRobot reading, per joint (deg; gripper unused), shared with all
+# contributors in lerobot-tabletop/calibration/follower_sim_offsets.json (values, method and
+# confidence; measured 2026-11-26 from wrist-roll sweeps and two capture sessions fitted to the
+# overhead arm silhouette and the wrist view of the cube and bin). Observations are converted to
+# the sim convention and commands back, so the policy sees the joint angles it was trained with.
+OFFSETS_FILE = CALIBRATION_DIR / "follower_sim_offsets.json"
+
+
+def load_sim_offsets() -> tuple[float, ...]:
+    """Offsets from the shared file; warns if the follower calibration changed since they were
+    measured (they are only valid for that calibration)."""
+    import hashlib
+
+    data = json.loads(OFFSETS_FILE.read_text())
+    follower = ROOT / data["valid_for"]["file"]
+    lf = follower.read_bytes().replace(b"\r\n", b"\n")
+    if hashlib.sha256(lf).hexdigest() != data["valid_for"]["sha256_lf"]:
+        print(f"WARNING: {follower.name} differs from the calibration the sim offsets were measured with "
+              f"({OFFSETS_FILE.name}); re-measure them before trusting the joint conversion", flush=True)
+    return tuple(float(v) for v in data["sim_minus_real_deg"])
+
+
+SIM_MINUS_REAL_DEG = load_sim_offsets()
 REAL_ROLL_LIMIT = 175.0  # wrist_roll is calibrated over one full turn (+-180 deg)
 
 
