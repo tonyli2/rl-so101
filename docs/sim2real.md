@@ -19,6 +19,14 @@ failure solely to the policy, demonstration count, or training duration.
   `so101_rl/compare_overhead.py` on branch `kammy` (`--live` for a fresh frame). Likely root cause:
   the board-to-follower offset the ChArUco calibration assumed. Policies and datasets rendered with
   the old pose see a different overhead view.
+- **Real follower joint readings vs sim convention (2026-11-26).** The real follower's LeRobot
+  readings are offset from the sim joints: sim = real + offset, with offsets (deg) shoulder pan +3.0,
+  lift -1.5, elbow -9.5, wrist flex 0, wrist roll -80.5 (gripper not measured). The values,
+  method and confidence are in `lerobot-tabletop/calibration/follower_sim_offsets.json`. Convert
+  readings before giving them to a sim-trained policy and send real = sim - offset. Lift and elbow
+  trade off: their sum is well determined, the split is not. Valid only for the follower
+  calibration recorded in that file; recalibrating the follower requires re-measuring. Plain
+  leader-to-follower teleoperation is unaffected (both arms use the real convention).
 - Overhead lens and (replaced) optical pose: ChArUco measurements from branch
   `camera-calibration`, commit `0bb66e5c12d1cda55feff71389e3a3dace46478b`.
   The calibration used the physical follower on its current side. Board offsets
