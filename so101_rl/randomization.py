@@ -87,11 +87,21 @@ class Ranges:
     # sampled uniformly from 0..this, independently of the command latency above.
     obs_latency_steps: int = 0
     image_latency_steps: int = 0
+    # Lower ends (the real arm is never faster than ~2 command steps) and the chance of an episode
+    # with no delay at all (so the policy still works when nothing is late).
+    latency_min_steps: int = 0
+    image_latency_min_steps: int = 0
+    zero_delay_prob: float = 0.0
+    # "appearance": Tony's visual protocol (lerobot-tabletop recording/visual_randomization.py,
+    # release overlay): material gloss, surface tones, light direction/intensity/colour and camera
+    # effects (exposure, white balance, noise, blur), each axis on with probability = strength;
+    # plus a per-episode image shift of up to +-image_shift_px pixels per camera.
+    image_shift_px: int = 4
     # Per-factor cap on strength (0-1), from the calibration pilot (calibrate_ranges.py): each
     # factor's ranges are scaled by curriculum strength x its cap.
     factor_strength: dict = field(default_factory=lambda: {"texture": 1.0, "lighting": 1.0,
                                                            "camera": 1.0, "friction": 1.0,
-                                                           "actuator": 1.0})
+                                                           "actuator": 1.0, "appearance": 1.0})
 
 
 class Randomizer:
@@ -127,6 +137,12 @@ class Randomizer:
         self.gain0 = m.actuator_gainprm[self.act].copy()
         self.bias0 = m.actuator_biasprm[self.act].copy()
         self.forcerange0 = m.actuator_forcerange[self.act].copy()
+        # Appearance factor (Tony's protocol) changes these; nominal() restores them.
+        self.mat_specular0, self.mat_shininess0 = m.mat_specular.copy(), m.mat_shininess.copy()
+        self.mat_rgba_all0, self.geom_rgba0 = m.mat_rgba.copy(), m.geom_rgba.copy()
+        self.light_specular0, self.light_pos0 = m.light_specular.copy(), m.light_pos.copy()
+        self.head_diffuse0 = m.vis.headlight.diffuse.copy()
+        self.appearance_mats = {n: mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_MATERIAL, n) for n in APPEARANCE_MATS}
 
     # --- sampling -----------------------------------------------------------------------------
     def sample(self, rng: np.random.Generator, ranges: Ranges, factors=("texture", "lighting", "camera", "friction"),
@@ -136,7 +152,7 @@ class Randomizer:
         probability 1 - strength."""
         base = float(np.clip(strength, 0.0, 1.0))
         cap = {"texture": 1.0, "lighting": 1.0, "camera": 1.0, "friction": 1.0, "actuator": 1.0,
-               **ranges.factor_strength}
+               "appearance": 1.0, **ranges.factor_strength}
         p: dict = {}
         n_lights = len(self.light_dir0)
         s = base * cap["texture"]
@@ -168,11 +184,19 @@ class Randomizer:
             p["friction"] = float(rng.uniform(*toward(self.friction0, *ranges.friction)))
         s = base * cap["actuator"]
         if "actuator" in factors:  # latency only (servo gain/torque changes barely mattered in the sweep)
-            p["actuator"] = {"latency_steps": int(rng.integers(0, round(s * ranges.latency_steps) + 1))}
+            def draw(lo: int, hi: int) -> int:
+                top = round(s * hi)
+                return int(rng.integers(min(round(s * lo), top), top + 1))
+            p["actuator"] = {"latency_steps": draw(ranges.latency_min_steps, ranges.latency_steps)}
             if ranges.obs_latency_steps:
-                p["actuator"]["obs_latency_steps"] = int(rng.integers(0, round(s * ranges.obs_latency_steps) + 1))
+                p["actuator"]["obs_latency_steps"] = draw(0, ranges.obs_latency_steps)
             if ranges.image_latency_steps:
-                p["actuator"]["image_latency_steps"] = int(rng.integers(0, round(s * ranges.image_latency_steps) + 1))
+                p["actuator"]["image_latency_steps"] = draw(ranges.image_latency_min_steps, ranges.image_latency_steps)
+            if rng.random() < ranges.zero_delay_prob:
+                p["actuator"] = {k: 0 for k in p["actuator"]}
+        s = base * cap["appearance"]
+        if "appearance" in factors:
+            p["appearance"] = sample_appearance(rng, s, ranges.image_shift_px)
         return p
 
     # --- applying -----------------------------------------------------------------------------
@@ -190,6 +214,10 @@ class Randomizer:
         m.actuator_gainprm[self.act] = self.gain0
         m.actuator_biasprm[self.act] = self.bias0
         m.actuator_forcerange[self.act] = self.forcerange0
+        m.mat_specular[:], m.mat_shininess[:] = self.mat_specular0, self.mat_shininess0
+        m.mat_rgba[:], m.geom_rgba[:] = self.mat_rgba_all0, self.geom_rgba0
+        m.light_specular[:], m.light_pos[:] = self.light_specular0, self.light_pos0
+        m.vis.headlight.diffuse[:] = self.head_diffuse0
 
     def _apply_camera(self, cam: int, c: dict) -> None:
         m = self.world.model
@@ -241,3 +269,111 @@ class Randomizer:
             m.actuator_biasprm[self.act, 1] = self.bias0[:, 1] * kp
             m.actuator_biasprm[self.act, 2] = self.bias0[:, 2] * kv
             m.actuator_forcerange[self.act] = self.forcerange0 * a.get("torque_scale", 1.0)
+        if "appearance" in p:
+            apply_appearance(m, self.appearance_mats, p["appearance"])
+
+
+# --- Tony's appearance protocol ---------------------------------------------------------------
+# Ported from lerobot-tabletop/recording/visual_randomization.py (dataset-so101-physical-v1-200ep
+# training-tools overlay): the same axes and ranges, sampled from the env's generator. Each axis is
+# applied with probability = strength (curriculum), like texture swaps above.
+APPEARANCE_MATS = ("red_pla", "box", "paper", "sts3215_03a_v1_material", "printed_mount_black")
+APPEARANCE_AXES = ("material_gloss", "surface_tone", "light_direction", "light_intensity", "light_color",
+                   "camera_effects")
+
+
+def sample_appearance(rng: np.random.Generator, strength: float, shift_px: int) -> dict:
+    p = {
+        "material_gloss": {"plastic_specular": rng.uniform(0.05, 0.65), "plastic_shininess": rng.uniform(0.08, 0.75),
+                           "arm_specular": rng.uniform(0.18, 0.75), "paper_specular": rng.uniform(0, 0.07),
+                           "paper_shininess": rng.uniform(0.02, 0.16)},
+        "surface_tone": {"red_hue_shift": rng.uniform(-0.015, 0.015), "red_saturation_scale": rng.uniform(0.85, 1.12),
+                         "red_value_scale": rng.uniform(0.8, 1.05), "bin_grey": rng.uniform(0.34, 0.65),
+                         "paper_white": rng.uniform(0.84, 0.99), "paper_warmth": rng.uniform(-0.035, 0.035),
+                         "arm_black": rng.uniform(0.055, 0.16)},
+        "light_direction": {"tilt_x": rng.uniform(-0.65, 0.65), "tilt_y": rng.uniform(-0.65, 0.65)},
+        "light_intensity": {"scale": rng.uniform(0.6, 1.4), "ambient_scale": rng.uniform(0.7, 1.25)},
+        "light_color": {"rgb_gain": rng.uniform([0.82, 0.91, 0.82], [1.1, 1.03, 1.1]).tolist()},
+        "camera_effects": {"exposure": rng.uniform(0.82, 1.18), "channel_gain": rng.uniform(0.95, 1.05, 3).tolist(),
+                           "noise_sigma_255": rng.uniform(1.5, 5), "blur_radius_px": rng.uniform(0.15, 0.65)},
+    }
+    p = {k: ({kk: (float(vv) if np.isscalar(vv) else vv) for kk, vv in v.items()}) for k, v in p.items()}
+    p["axes"] = [a for a in APPEARANCE_AXES if rng.random() < strength]
+    top = round(strength * shift_px)
+    p["shift_px"] = rng.integers(-top, top + 1, (2, 2)).tolist()  # per camera: (dx, dy)
+    p["noise_seed"] = int(rng.integers(2**31))
+    return p
+
+
+def apply_appearance(m: mujoco.MjModel, mats: dict, p: dict) -> None:
+    """Tony's apply_profile on a model already reset to nominal (Randomizer.nominal)."""
+    import colorsys
+
+    axes = set(p["axes"])
+    cube, box, paper, arm, mount = (mats[n] for n in APPEARANCE_MATS)
+    if "material_gloss" in axes:
+        g = p["material_gloss"]
+        for i in (cube, box):
+            m.mat_specular[i], m.mat_shininess[i] = g["plastic_specular"], g["plastic_shininess"]
+        for i in (arm, mount):
+            m.mat_specular[i], m.mat_shininess[i] = g["arm_specular"], g["plastic_shininess"]
+        m.mat_specular[paper], m.mat_shininess[paper] = g["paper_specular"], g["paper_shininess"]
+    if "surface_tone" in axes:
+        t = p["surface_tone"]
+        h, sat, v = colorsys.rgb_to_hsv(*m.mat_rgba[cube, :3])
+        m.mat_rgba[cube, :3] = colorsys.hsv_to_rgb((h + t["red_hue_shift"]) % 1, min(1, sat * t["red_saturation_scale"]),
+                                                   min(1, v * t["red_value_scale"]))
+        m.mat_rgba[box, :3] = t["bin_grey"]
+        m.mat_rgba[paper, :3] = np.clip([t["paper_white"] + t["paper_warmth"], t["paper_white"],
+                                         t["paper_white"] - t["paper_warmth"]], 0, 1)
+        for i in (arm, mount):
+            m.mat_rgba[i, :3] = t["arm_black"]
+        for g in range(m.ngeom):
+            name = m.geom(g).name or ""
+            if (name == "table" or name.startswith("paper_curtain_")) and not np.array_equal(m.geom_rgba[g], [0.5, 0.5, 0.5, 1.0]):
+                m.geom_rgba[g, :3] = m.mat_rgba[paper, :3]
+    if "light_direction" in axes:
+        d = np.array([p["light_direction"]["tilt_x"], p["light_direction"]["tilt_y"], -1.0])
+        m.light_dir[0] = d / np.linalg.norm(d)
+    if "light_intensity" in axes:
+        li = p["light_intensity"]
+        m.light_diffuse[:] *= li["scale"]
+        m.light_specular[:] *= li["scale"]
+        m.vis.headlight.diffuse[:] *= li["scale"]
+        m.vis.headlight.ambient[:] *= li["ambient_scale"]
+    if "light_color" in axes:
+        gain = np.asarray(p["light_color"]["rgb_gain"])
+        m.light_diffuse[:] *= gain
+        m.light_specular[:] *= gain
+        m.vis.headlight.diffuse[:] *= gain
+
+
+def image_effects(p: dict, width: int):
+    """Per-frame camera effects (Tony's augment_image, blur and noise scaled from his 640 px to
+    ``width``; checked against full-resolution augmentation in eval_suite.py) and the episode's
+    image shift. Returns fx(image, camera_index, step) or None."""
+    from PIL import Image, ImageEnhance, ImageFilter
+
+    k = width / 640
+    on = "camera_effects" in p["axes"]
+    c = p["camera_effects"]
+    shifts = p.get("shift_px", [[0, 0], [0, 0]])
+    if not on and not any(any(s) for s in shifts):
+        return None
+
+    def fx(image: np.ndarray, cam: int, step: int) -> np.ndarray:
+        if on:
+            im = ImageEnhance.Brightness(Image.fromarray(image)).enhance(c["exposure"])
+            im = im.filter(ImageFilter.GaussianBlur(c["blur_radius_px"] * k))
+            px = np.asarray(im, dtype=np.float32) * np.asarray(c["channel_gain"], dtype=np.float32)
+            rng = np.random.default_rng([p["noise_seed"], cam, step])
+            px += rng.normal(0, c["noise_sigma_255"] * k, px.shape)
+            image = np.clip(px, 0, 255).astype(np.uint8)
+        dx, dy = shifts[cam]
+        if dx or dy:
+            h, w = image.shape[:2]
+            pad = np.pad(image, ((abs(dy), abs(dy)), (abs(dx), abs(dx)), (0, 0)), mode="edge")
+            image = pad[abs(dy) + dy: abs(dy) + dy + h, abs(dx) + dx: abs(dx) + dx + w]
+        return image
+
+    return fx

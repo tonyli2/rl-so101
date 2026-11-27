@@ -8,6 +8,11 @@ keeps its spatial layout (where the cube is matters), is reduced by a 1x1 conv a
 With ``freeze=True`` (default) the ResNets keep their ImageNet weights and BatchNorm statistics;
 only the projection heads and the policy train, which resists overfitting on 45 demonstrations.
 
+``head="keypoints"``: spatial softmax (Levine et al. 2016) instead of flatten. A 1x1 conv makes
+``keypoints`` heat maps per camera; each becomes its expected image position (x, y in [-1, 1]) and its
+peak strength. Positions interpolate between grid cells, so the cube is located more finely than the
+coarse feature grid, with far fewer weights than the flatten head (which overfit on layer3's grid).
+
 ``state_dim_out`` (balanced branches): the joint state gets its own MLP with as many outputs as each
 camera, and every branch ends in a LayerNorm, so cameras and state enter the policy at the same
 scale. Without it (the default, as in the first models) the raw 36 state values sit next to 512
@@ -35,6 +40,9 @@ class ResNetExtractor(BaseFeaturesExtractor):
         freeze: bool = True,
         state_dim_out: int | None = None,
         state_hidden: int = 128,
+        trunk: str = "layer4",
+        head: str = "flatten",
+        keypoints: int = 32,
     ):
         cameras = [k for k, s in observation_space.spaces.items() if len(s.shape) == 3]
         state_dim = sum(s.shape[0] for k, s in observation_space.spaces.items() if len(s.shape) == 1)
@@ -45,6 +53,15 @@ class ResNetExtractor(BaseFeaturesExtractor):
         self.cameras = cameras
         self.state_keys = [k for k, s in observation_space.spaces.items() if len(s.shape) == 1]
         self.freeze = freeze
+        # "layer4": ResNet18 up to its last stage (stride 32: a 96x128 frame becomes a 3x4 grid);
+        # "layer3": stop one stage earlier (stride 16: 6x8 grid, 256 channels), finer for locating
+        # an object that moves (the cube spans about one layer4 cell).
+        if trunk not in ("layer4", "layer3"):
+            raise ValueError("trunk must be 'layer4' or 'layer3'")
+        if head not in ("flatten", "keypoints"):
+            raise ValueError("head must be 'flatten' or 'keypoints'")
+        self.trunk = trunk
+        self.head = head
         self.backbones = nn.ModuleDict()
         self.heads = nn.ModuleDict()
         for key in cameras:
@@ -53,16 +70,25 @@ class ResNetExtractor(BaseFeaturesExtractor):
                 raise ValueError(f"{key}: expected stacked RGB frames, got {channels} channels")
             frames = channels // 3
             net = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
-            body = nn.Sequential(*list(net.children())[:-2])  # drop avgpool + classifier
+            body = nn.Sequential(*list(net.children())[: -2 if trunk == "layer4" else -3])  # drop pool + fc (+ layer4)
             if freeze:
                 body.requires_grad_(False)
             with torch.no_grad():
                 _, c, h, w = body.eval()(torch.zeros(1, 3, height, width)).shape
             self.backbones[key] = body
-            head = {
-                "reduce": nn.Sequential(nn.Conv2d(c, proj_channels, 1), nn.ReLU()),
-                "project": nn.Sequential(nn.Linear(frames * proj_channels * h * w, out_dim), nn.ReLU()),
-            }
+            if self.head == "keypoints":
+                head = {
+                    "reduce": nn.Conv2d(c, keypoints, 1),
+                    "project": nn.Sequential(nn.Linear(frames * keypoints * 3, out_dim), nn.ReLU()),
+                }
+                self.register_buffer(f"grid_x_{key}", torch.linspace(-1, 1, w).repeat(h), persistent=False)
+                self.register_buffer(f"grid_y_{key}", torch.linspace(-1, 1, h).repeat_interleave(w), persistent=False)
+                self.log_temp = nn.Parameter(torch.zeros(()))  # softmax temperature (shared)
+            else:
+                head = {
+                    "reduce": nn.Sequential(nn.Conv2d(c, proj_channels, 1), nn.ReLU()),
+                    "project": nn.Sequential(nn.Linear(frames * proj_channels * h * w, out_dim), nn.ReLU()),
+                }
             if balanced:
                 head["norm"] = nn.LayerNorm(out_dim)
             self.heads[key] = nn.ModuleDict(head)
@@ -90,7 +116,8 @@ class ResNetExtractor(BaseFeaturesExtractor):
 
     def matches_imagenet(self) -> bool:
         """True if every backbone still holds the ImageNet weights."""
-        reference = nn.Sequential(*list(resnet18(weights=ResNet18_Weights.IMAGENET1K_V1).children())[:-2])
+        cut = -2 if self.trunk == "layer4" else -3
+        reference = nn.Sequential(*list(resnet18(weights=ResNet18_Weights.IMAGENET1K_V1).children())[:cut])
         ref = reference.state_dict()
         return all(
             torch.equal(value.detach().cpu(), ref[name])
@@ -115,8 +142,15 @@ class ResNetExtractor(BaseFeaturesExtractor):
             half = self.freeze and x.is_cuda
             with torch.set_grad_enabled(not self.freeze and torch.is_grad_enabled()), \
                     torch.autocast("cuda", dtype=torch.float16, enabled=half):
-                fmap = self.backbones[key](x).float()             # B*frames, 512, h, w
-            z = self.heads[key]["reduce"](fmap)                   # B*frames, proj, h, w
+                fmap = self.backbones[key](x).float()             # B*frames, 512 (256 for layer3), h, w
+            z = self.heads[key]["reduce"](fmap)                   # B*frames, proj (or K), h, w
+            if self.head == "keypoints":
+                n, k = z.shape[:2]
+                logits = z.reshape(n, k, -1)
+                attn = torch.softmax(logits / self.log_temp.exp(), dim=-1)          # B*frames, K, h*w
+                gx, gy = getattr(self, f"grid_x_{key}"), getattr(self, f"grid_y_{key}")
+                z = torch.cat([attn @ gx[:, None], attn @ gy[:, None],
+                               logits.amax(-1, keepdim=True)], dim=-1)               # B*frames, K, 3
             z = self.heads[key]["project"](z.reshape(b, -1))
             if self.balanced:
                 z = self.heads[key]["norm"](z)

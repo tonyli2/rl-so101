@@ -42,6 +42,13 @@ class Policy:
     def mapper(self, lo, hi) -> ActionMapper:
         return ActionMapper.from_config(self.obs, lo, hi)
 
+    @property
+    def action_history(self) -> int:
+        """K > 0: the state ends with the policy's own last K actions (oldest first, each clipped to
+        [-1, 1], zeros right after reset), after the joint readings. A hardware runner must keep
+        this buffer itself: append every action it sends, never the measured motion."""
+        return int(self.obs.get("action_history", 0))
+
 
 def load_policy(bundle: str | Path, device: str = "auto", allow_other_base: bool = False) -> Policy:
     bundle = Path(bundle)

@@ -48,7 +48,8 @@ OUT = HERE / "outputs" / "bc"
 # Tony's teleoperated demos in the old scene, cube fixed.
 OBS = {"history": 3, "velocities": True, "action": "absolute", "relative_scale": None, "trim_idle": False,
        "relative_base": "measured", "resync": None,
-       "dataset": "sim-baseline", "cube_xy_range": 0.0, "cube_yaw_deg": 0.0}
+       "dataset": "sim-baseline", "cube_xy_range": 0.0, "cube_yaw_deg": 0.0,
+       "bin_away_range": [0.0, 0.0], "bin_side_range": 0.0, "action_history": 0}
 
 
 def data_path() -> Path:
@@ -74,14 +75,16 @@ IDLE_DEG = 1.0  # leading frames whose command is within this of the measured ar
 def configure(history: int = 3, velocities: bool = True, action: str = "absolute",
               relative_scale: list | None = None, trim_idle: bool = False,
               relative_base: str = "measured", resync: dict | None = None,
-              dataset: str = "sim-baseline", cube_xy_range: float = 0.0, cube_yaw_deg: float = 0.0) -> None:
+              dataset: str = "sim-baseline", cube_xy_range: float = 0.0, cube_yaw_deg: float = 0.0,
+              bin_away_range=(0.0, 0.0), bin_side_range: float = 0.0, action_history: int = 0) -> None:
     """``relative_base``/``resync``: how relative actions become targets (action_mapping.py).
     ``dataset``: demos the run trained on; ``cube_xy_range``/``cube_yaw_deg``: cube placement
     (+- metres / degrees around the scene's cube spot), as in those demos.
     Configs saved before these existed load with the old defaults, what those runs trained with."""
     OBS.update(history=history, velocities=velocities, action=action, relative_scale=relative_scale,
                trim_idle=trim_idle, relative_base=relative_base, resync=resync,
-               dataset=dataset, cube_xy_range=cube_xy_range, cube_yaw_deg=cube_yaw_deg)
+               dataset=dataset, cube_xy_range=cube_xy_range, cube_yaw_deg=cube_yaw_deg,
+               bin_away_range=list(bin_away_range), bin_side_range=bin_side_range, action_history=action_history)
 
 
 def load_config(model_path: Path) -> None:
@@ -95,7 +98,9 @@ def env_kwargs(**extra) -> dict:
     xy = float(OBS["cube_xy_range"])
     kwargs = {"action_mode": OBS["action"], "image": True, "history": OBS["history"], "cube_xy_range": (xy, xy),
               "cube_yaw_range": float(np.deg2rad(OBS["cube_yaw_deg"])),
-              "include_targets": False, "wrist": True, "include_velocities": OBS["velocities"]}
+              "bin_away_range": tuple(OBS["bin_away_range"]), "bin_side_range": float(OBS["bin_side_range"]),
+              "include_targets": False, "wrist": True, "include_velocities": OBS["velocities"],
+              "action_history": int(OBS.get("action_history", 0))}
     if OBS["action"] == "relative":
         kwargs["relative_scale"] = OBS["relative_scale"]
         kwargs["relative_base"] = OBS["relative_base"]
@@ -181,6 +186,21 @@ class Demos:
             labels = arrays["actions"]
             self.half_range = self.span / 2
         self.actions = torch.as_tensor(labels.astype(np.float32), device=device)
+        # Recent actions (env action_history): the demo's own previous K labels, oldest first, zeros
+        # before the episode start. Noise-augmented copies use their source frame's history.
+        self.history_dims = 0
+        k_hist = int(OBS.get("action_history", 0))
+        if k_hist:
+            clean_at = {(int(e), int(f)): i for i, (e, f) in enumerate(zip(self.episode[:clean], frame[:clean]))}
+            prev = np.zeros((n, k_hist, 6), np.float32)
+            for i in range(n):
+                e, f = int(self.episode[i]), int(frame[i])
+                for k in range(1, k_hist + 1):
+                    j = clean_at.get((e, f - k))
+                    if j is not None:
+                        prev[i, k_hist - k] = labels[j]
+            self.history_dims = 6 * k_hist
+            self.states = torch.cat([self.states, torch.as_tensor(prev.reshape(n, -1), device=device)], dim=1)
         self.train_idx = np.flatnonzero(~val & keep)
         self.val_idx = np.flatnonzero(val & keep)
         print(f"frames: {clean} clean + {int(self.is_perturbed.sum())} perturbed; images on {self.image_device}; "
@@ -189,9 +209,16 @@ class Demos:
         if OBS["action"] == "relative":
             print("relative action scale (deg; gripper rad->deg too):", np.rad2deg(scale).round(2).tolist())
 
-    def batch(self, idx: np.ndarray, shift: int = 0) -> tuple[dict, torch.Tensor]:
+    def batch(self, idx: np.ndarray, shift: int = 0, history_dropout: float = 0.0) -> tuple[dict, torch.Tensor]:
         h = torch.as_tensor(self.hist[idx])                                       # B,history
-        obs = {"state": self.states[h.to(self.device)].reshape(len(idx), -1)}     # B,history*S
+        states = self.states[h.to(self.device)]                                   # B,history,S
+        if history_dropout and self.history_dims:
+            # Hide the recent actions for a random part of the batch, so BC cannot just copy its
+            # previous action (the "copycat" failure envs.py warns about for commanded targets).
+            drop = torch.rand(len(idx), device=self.device) < history_dropout
+            states = states.clone()
+            states[drop, :, -self.history_dims:] = 0
+        obs = {"state": states.reshape(len(idx), -1)}                             # B,history*S
         for key, frames in self.cameras.items():
             image = frames[h.to(self.image_device)].reshape(len(idx), -1, *frames.shape[2:])
             image = image.to(self.device, non_blocking=True)                     # B,3*history,H,W
@@ -421,6 +448,16 @@ def main() -> None:
                         help="relative: motion from the measured joints; absolute: target positions")
     parser.add_argument("--trim-idle", action=argparse.BooleanOptionalAction, default=True,
                         help="drop each demonstration's leading idle frames (human not moving yet)")
+    parser.add_argument("--trunk", choices=("layer4", "layer3"), default="layer4",
+                        help="ResNet18 stage the image features come from: layer4 (3x4 grid at 96x128) or "
+                             "layer3 (6x8 grid, finer localization)")
+    parser.add_argument("--head", choices=("flatten", "keypoints"), default="flatten",
+                        help="image head: flatten the feature grid, or spatial-softmax keypoints")
+    parser.add_argument("--keypoints", type=int, default=32, help="keypoints per camera (--head keypoints)")
+    parser.add_argument("--action-history", type=int, default=0,
+                        help="append the policy's last K actions to the state (latency awareness)")
+    parser.add_argument("--history-dropout", type=float, default=0.5,
+                        help="fraction of BC samples with the recent actions hidden (anti-copycat)")
     parser.add_argument("--dataset", default="sim-baseline",
                         help="outputs/bc_data/<name>.npz: sim-baseline (Tony's demos, old scene) or a "
                              "make_scripted_dataset.py dataset (current scene)")
@@ -432,9 +469,11 @@ def main() -> None:
     if args.view or args.eval:
         load_config(args.view or args.eval)
     else:
-        configure(args.history, args.velocities, args.action, None, args.trim_idle, dataset=args.dataset)
+        configure(args.history, args.velocities, args.action, None, args.trim_idle, dataset=args.dataset,
+                  action_history=args.action_history)
         layout = dataset_info().get("layout", {})  # cube placement of the demos (scripted datasets)
-        OBS.update(cube_xy_range=layout.get("cube_xy_m", 0.0), cube_yaw_deg=layout.get("cube_yaw_deg", 0.0))
+        OBS.update(cube_xy_range=layout.get("cube_xy_m", 0.0), cube_yaw_deg=layout.get("cube_yaw_deg", 0.0),
+                   bin_away_range=layout.get("bin_away_m", [0.0, 0.0]), bin_side_range=layout.get("bin_side_m", 0.0))
     if not data_path().is_file():
         sys.exit(f"{data_path()} missing: run make_bc_dataset.py or make_scripted_dataset.py first")
     perturbed = None
@@ -465,7 +504,7 @@ def main() -> None:
     venv = make_vec_env(So101PickPlaceEnv, n_envs=1, seed=args.seed, env_kwargs=env_kwargs())
     policy_kwargs = {"net_arch": {"pi": [256, 256], "vf": [256, 256]}, "log_std_init": -1.0}
     if args.encoder == "resnet18":
-        extractor_kwargs = {"freeze": True}
+        extractor_kwargs = {"freeze": True, "trunk": args.trunk, "head": args.head, "keypoints": args.keypoints}
         if args.state_net:
             extractor_kwargs["state_dim_out"] = 256  # same width as each camera branch
         policy_kwargs.update(features_extractor_class=ResNetExtractor, features_extractor_kwargs=extractor_kwargs)
@@ -490,7 +529,8 @@ def main() -> None:
         order = rng.permutation(demos.train_idx)
         losses = []
         for i in range(steps_per_epoch):
-            obs, act = demos.batch(order[i * args.batch : (i + 1) * args.batch], shift=args.shift)
+            obs, act = demos.batch(order[i * args.batch : (i + 1) * args.batch], shift=args.shift,
+                                   history_dropout=args.history_dropout)
             dist = policy.get_distribution(obs)
             loss = -dist.log_prob(act).mean()
             optimizer.zero_grad(set_to_none=True)

@@ -40,6 +40,27 @@ PERTURBED = HERE / "outputs" / "bc_data" / "sim-baseline-perturbed.npz"
 STATE_MASK = mujoco.mjtState.mjSTATE_INTEGRATION
 TRAIN_EPISODES = range(0, 45)  # Tony's recommended split (release notes / dataset manifest)
 VAL_EPISODES = range(45, 50)
+# Varying-layout releases (dataset-so101-physical-v1-200ep): set from the source by configure().
+LAYOUT: dict = {}
+
+
+def configure(source: Path, name: str) -> None:
+    """Point the converter at another release. Only original demonstrations are replayed (visual
+    variants share their motion and would render identically in this sim); the split follows the
+    release's export.json."""
+    global DATASET, OUT, PERTURBED, TRAIN_EPISODES, VAL_EPISODES, LAYOUT
+    root = Path(source)
+    DATASET = root / "all" if (root / "all" / "sim_archive").is_dir() else root
+    OUT = HERE / "outputs" / "bc_data" / f"{name}.npz"
+    PERTURBED = HERE / "outputs" / "bc_data" / f"{name}-perturbed.npz"
+    export = root / "export.json"
+    if export.is_file():
+        e = json.loads(export.read_text())
+        originals = set(range(int(e.get("original_episodes", 50))))
+        VAL_EPISODES = sorted(set(e["eval_indices"]) & originals)
+        TRAIN_EPISODES = sorted(originals - set(VAL_EPISODES))
+        LAYOUT = {"cube_xy_m": 0.04, "bin_away_m": [0.0, 0.04], "bin_side_m": 0.04,
+                  "source": "lerobot-tabletop/recording/layout.py protocol v1"}
 
 
 class ArchiveReplayer:
@@ -80,6 +101,9 @@ class ArchiveReplayer:
         w.qfrc_applied[:] = data.qfrc_applied
         w.xfrc_applied[: model.nbody] = data.xfrc_applied
         self.world.set_target((0.45, 0.30, -0.2))  # the env hides the reach marker in this task
+        # Varying layouts: the bin is a fixed body moved per episode in the archived scene.
+        box = model.body("box").id
+        self.world.model.body_pos[self.world.box_body] = model.body_pos[box]
         mujoco.mj_forward(self.world.model, w)
         self.env._target_ctrl = self.world.ctrl  # the commanded targets are part of the observation
 
@@ -125,6 +149,8 @@ def episodes() -> list[dict]:
         meta = json.loads(meta_path.read_text())
         if not meta["metadata"].get("policy_eligible", False):
             continue
+        if "source_episode_index" in meta["metadata"]:  # visual variant of an original
+            continue
         if meta["state_mask"] != int(STATE_MASK):
             raise RuntimeError(f"{meta_path.name}: state mask {meta['state_mask']} != {int(STATE_MASK)}")
         items.append({
@@ -166,6 +192,31 @@ def check_replay(replayer: ArchiveReplayer, items: list[dict], count: int) -> li
         print(f"replay episode {item['index']:2d}: {len(controls)} steps, max qpos drift "
               f"{results[-1]['max_qpos_drift']:.2e}, final cube error {results[-1]['final_cube_error_m'] * 1000:.3f} mm")
     return results
+
+
+def render_clean(replayer: ArchiveReplayer, items: list[dict]) -> dict[str, np.ndarray]:
+    """Re-render every recorded frame of ``items`` with the env's cameras (the clean dataset)."""
+    env = replayer.env
+    states, images, wrist_images, actions, episode, frame = [], [], [], [], [], []
+    for item in items:
+        with np.load(item["npz"]) as arrays:
+            ep_states, controls = arrays["states"], arrays["controls"]
+        for t in range(len(controls)):  # the terminal state has no action
+            replayer.load(item["scene"], ep_states[t])
+            obs = env._observe(fresh=True)
+            states.append(obs["state"])
+            images.append(obs["front"])
+            wrist_images.append(obs["wrist"])
+            actions.append(to_action(env.world, controls[t]))
+            episode.append(item["index"])
+            frame.append(t)
+        print(f"episode {item['index']:2d}: {len(controls)} frames", flush=True)
+    return {
+        "states": np.asarray(states, np.float32), "images": np.asarray(images, np.uint8),
+        "wrist_images": np.asarray(wrist_images, np.uint8),
+        "actions": np.asarray(actions, np.float32), "episode": np.asarray(episode, np.int16),
+        "frame": np.asarray(frame, np.int32),
+    }
 
 
 def make_perturbed(replayer: ArchiveReplayer, items: list[dict], args) -> None:
@@ -224,7 +275,12 @@ def main() -> None:
                              f"{PERTURBED.name} instead of the clean dataset")
     parser.add_argument("--perturb-deg", type=float, default=2.5, help="std of the arm-joint offsets (degrees)")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--source", type=Path, help="another release's extracted root (e.g. "
+                        "datasets/sim-varying-1-visual-v1); default: sim-baseline")
+    parser.add_argument("--name", default="sim-baseline", help="output name: outputs/bc_data/<name>.npz")
     args = parser.parse_args()
+    if args.source is not None:
+        configure(args.source, args.name)
     if not DATASET.is_dir():
         sys.exit(f"Dataset not found at {DATASET}; download and extract the sim-baseline-clean-50-v1 release")
 
@@ -241,33 +297,15 @@ def main() -> None:
 
     replay = check_replay(replayer, items, args.check_replay) if args.check_replay else []
 
-    states, images, wrist_images, actions, episode, frame = [], [], [], [], [], []
     start = time.time()
-    for item in items:
-        arrays = np.load(item["npz"])
-        ep_states, controls = arrays["states"], arrays["controls"]
-        for t in range(len(controls)):  # the terminal state has no action
-            replayer.load(item["scene"], ep_states[t])
-            obs = env._observe(fresh=True)
-            states.append(obs["state"])
-            images.append(obs["front"])
-            wrist_images.append(obs["wrist"])
-            actions.append(to_action(env.world, controls[t]))
-            episode.append(item["index"])
-            frame.append(t)
-        print(f"episode {item['index']:2d}: {len(controls)} frames", flush=True)
+    data = render_clean(replayer, items)
     env.close()
-
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(
-        OUT,
-        states=np.asarray(states, np.float32), images=np.asarray(images, np.uint8),
-        wrist_images=np.asarray(wrist_images, np.uint8),
-        actions=np.asarray(actions, np.float32), episode=np.asarray(episode, np.int16),
-        frame=np.asarray(frame, np.int32),
-    )
+    np.savez(OUT, **data)
+    states, actions = data["states"], data["actions"]
     info = {
-        "source": str(DATASET), "release": "sim-baseline-clean-50-v1", "frames": len(actions),
+        "source": str(DATASET), "release": "sim-baseline-clean-50-v1" if not LAYOUT else str(DATASET.parent.name),
+        "frames": len(actions), "layout": LAYOUT,
         "episodes": len(items), "train_episodes": list(TRAIN_EPISODES), "val_episodes": list(VAL_EPISODES),
         "image_size": list(args.image_size), "camera": env.camera, "wrist_camera": env.WRIST_CAMERA,
         "action_mode": "absolute",

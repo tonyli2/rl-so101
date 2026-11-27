@@ -61,6 +61,7 @@ IN_BOX_MAX_HEIGHT = 0.06
 
 VARIANTS = ("mounted", "legacy")
 MOUNTED_DIR = TABLETOP / "mounts" / "generated"
+CURTAIN_GROUP, CURTAIN_PREFIX = 5, "paper_curtain_"  # lerobot-tabletop/mounts/enclosure.py
 
 
 def prepare_mounted(rebuild: bool = True) -> Path:
@@ -146,6 +147,12 @@ class So101World:
         self._ik_data = mujoco.MjData(m)
         # One renderer per image size: recreating a renderer (a new GL context) costs ~100 ms.
         self._renderers: dict[tuple[int, int], mujoco.Renderer] = {}
+        # Paper curtains (measured enclosure) sit in render group 5, hidden by default and stored
+        # translucent for inspection views. Sensor images show them opaque, as Tony's recorder,
+        # replay and evaluation do (mounts.enclosure.update_paper_scene; docs/simulation.md).
+        self._scene_option = mujoco.MjvOption()
+        self._scene_option.geomgroup[CURTAIN_GROUP] = 1
+        self._curtain_geoms = {g for g in range(m.ngeom) if (m.geom(g).name or "").startswith(CURTAIN_PREFIX)}
         mujoco.mj_forward(m, self.data)
         self._pointing = self._pointing_axis()
         self.base_pos = self.data.xpos[self.base_body].copy()
@@ -296,7 +303,13 @@ class So101World:
         renderer = self._renderers.get((height, width))
         if renderer is None:
             renderer = self._renderers[(height, width)] = mujoco.Renderer(self.model, height, width)
-        renderer.update_scene(self.data, camera=camera)
+        renderer.update_scene(self.data, camera=camera, scene_option=self._scene_option)
+        if self._curtain_geoms:
+            scene = renderer.scene
+            for geom in scene.geoms[: scene.ngeom]:
+                if geom.objtype == mujoco.mjtObj.mjOBJ_GEOM and geom.objid in self._curtain_geoms:
+                    geom.rgba[3] = 1.0
+                    geom.transparent = 0
         return renderer.render().copy()
 
     def close(self) -> None:
@@ -330,6 +343,7 @@ class _So101TaskEnv(gym.Env):
         relative_scale=None,
         relative_base: str = "measured",
         resync: dict | None = None,
+        action_history: int = 0,
     ):
         super().__init__()
         # "relative" actions: target = measured joints + action * relative_scale (radians per joint).
@@ -380,9 +394,16 @@ class _So101TaskEnv(gym.Env):
         self._frames: deque = deque(maxlen=history)
         self._wrist_frames: deque = deque(maxlen=history)
         self._states: deque = deque(maxlen=history)
+        # The policy's last ``action_history`` actions (oldest first) appended to the state: under
+        # control latency they are the commands still on their way to the arm. Known at once by
+        # the controller, so never delayed with the joint readings.
+        self.action_history = action_history
+        self._past_actions: deque = deque(maxlen=max(1, action_history))
+        # Per-frame image effects (randomization "appearance"): fx(image, camera_index, step).
+        self.image_fx = None
 
         self.action_space = spaces.Box(-1.0, 1.0, (6,), np.float32)
-        n = len(self._state_vector())
+        n = len(self._state_vector()) + 6 * action_history
         spaces_dict = {"state": spaces.Box(-np.inf, np.inf, (n * history,), np.float32)}
         if image:
             h, w = image_size
@@ -419,6 +440,9 @@ class _So101TaskEnv(gym.Env):
             frame = self.world.render(self.camera, *self.image_size)
         if self.wrist:
             wrist = self.world.render(self.WRIST_CAMERA, *self.image_size)
+        if self.image_fx is not None:
+            frame = frame if frame is None else self.image_fx(frame, 0, self._steps)
+            wrist = wrist if wrist is None else self.image_fx(wrist, 1, self._steps)
         if fresh:
             self._sensed.clear()
         self._sensed.append((state, frame, wrist, self.world.qpos.copy()))
@@ -429,6 +453,8 @@ class _So101TaskEnv(gym.Env):
             self.reported_q = q.copy()
         else:
             self.reported_q = self._sensed[-1][3].copy()
+        if self.action_history:
+            state = np.concatenate([state, *self._past_actions]).astype(np.float32)
         streams = [(self._states, state), (self._frames, frame), (self._wrist_frames, wrist)]
         for buffer, item in streams:
             if item is None:
@@ -462,6 +488,8 @@ class _So101TaskEnv(gym.Env):
         if self.mapper is not None:
             self.mapper.reset(q)
         self._steps = 0
+        self._past_actions.clear()
+        self._past_actions.extend([np.zeros(6)] * self.action_history)
         self._reset_task()
         mujoco.mj_forward(self.world.model, self.world.data)
         return self._observe(fresh=True), {"is_success": False}
@@ -497,6 +525,8 @@ class _So101TaskEnv(gym.Env):
 
     def step(self, action):
         self._apply_action(action)
+        if self.action_history:
+            self._past_actions.append(np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0))
         self._steps += 1
         reward, terminated, info = self._reward(np.asarray(action))
         truncated = self._steps >= self.episode_steps
@@ -572,6 +602,8 @@ class So101PickPlaceEnv(_So101TaskEnv):
         episode_steps: int = 900,  # demonstrations average 513 steps; Tony's evaluation deadline is 900
         cube_xy_range: tuple[float, float] = (0.04, 0.06),
         cube_yaw_range: float = 0.0,
+        bin_away_range: tuple[float, float] = (0.0, 0.0),
+        bin_side_range: float = 0.0,
         settle_steps: int = 15,
         image: bool = True,
         shaping_gamma: float = 0.99,
@@ -579,6 +611,7 @@ class So101PickPlaceEnv(_So101TaskEnv):
         start_jitter_deg: float = 0.0,
         randomize: dict | None = None,
         fixed_factors: dict | None = None,
+        layout_grid: int = 5,
         **kwargs,
     ):
         # Domain randomization (randomization.py), applied at every reset:
@@ -591,6 +624,22 @@ class So101PickPlaceEnv(_So101TaskEnv):
         self.last_factors: dict = {}
         self.cube_xy_range = np.asarray(cube_xy_range)
         self.cube_yaw_range = cube_yaw_range
+        # Bin placement as in Tony's layout sampler (lerobot-tabletop/recording/layout.py): shifted
+        # bin_away_range metres along the cube->bin direction and +-bin_side_range across it, with
+        # layouts rejected when cube and bin overlap or leave the workspace. reset(options={"layout":
+        # {"cube_xy": [x, y], "cube_yaw": a, "bin_xy": [x, y]}}) places both exactly (replays, evals).
+        self.bin_away_range = tuple(bin_away_range)
+        self.bin_side_range = bin_side_range
+        self._reset_options: dict = {}
+        self._box0 = None
+        self.last_layout: dict = {}
+        # Hard-layout sampling: the cube range is split into layout_grid x layout_grid cells; with
+        # weights set (train_ppo's LayoutCurriculumCallback, from per-cell success) the cube's cell is
+        # drawn by weight, its position uniformly inside it. layout_cell (row = x, col = y) is
+        # reported in info for every layout, sampled or given.
+        self.layout_grid = layout_grid
+        self.layout_weights: np.ndarray | None = None
+        self.layout_cell = -1
         self.settle_steps = settle_steps
         self.shaping_gamma = shaping_gamma
         # Reset distribution for RL: random rows of start_joints (actuator radians, e.g. the
@@ -603,6 +652,7 @@ class So101PickPlaceEnv(_So101TaskEnv):
         super().__init__(episode_steps=episode_steps, image=image, **kwargs)
 
     def reset(self, seed: int | None = None, options: dict | None = None):
+        self._reset_options = dict(options or {})
         if self.start_joints is not None and not (options and options.get("joints") is not None):
             gym.Env.reset(self, seed=seed)  # seed np_random before sampling the start
             q = self.start_joints[self.np_random.integers(len(self.start_joints))].copy()
@@ -637,6 +687,8 @@ class So101PickPlaceEnv(_So101TaskEnv):
             self.last_factors = self._randomizer.sample(self.np_random, ranges, factors,
                                                         strength=getattr(self, "randomize_strength", 1.0))
         self._randomizer.apply(self.last_factors)
+        appearance = self.last_factors.get("appearance")
+        self.image_fx = randomization.image_effects(appearance, self.image_size[1]) if appearance else None
         act = self.last_factors.get("actuator", {})
         self.action_latency = int(act.get("latency_steps", 0))
         self.obs_latency = int(act.get("obs_latency_steps", 0))
@@ -646,14 +698,63 @@ class So101PickPlaceEnv(_So101TaskEnv):
         self._apply_randomization()
         w = self.world
         a = w.cube_qadr
-        xy = w.cube_start[:2] + self.np_random.uniform(-self.cube_xy_range, self.cube_xy_range)
-        yaw = self.np_random.uniform(-self.cube_yaw_range, self.cube_yaw_range)
+        if self._box0 is None:
+            self._box0 = w.model.body_pos[w.box_body].copy()
+        layout = self._reset_options.get("layout")
+        if layout is not None:
+            xy = np.asarray(layout["cube_xy"], dtype=np.float64)
+            yaw = float(layout.get("cube_yaw", 0.0))
+            box = self._box0.copy()
+            box[:2] = layout.get("bin_xy", self._box0[:2])
+        else:
+            xy, yaw, box = self._sample_layout()
+        w.model.body_pos[w.box_body] = box
+        self.layout_cell = self._cell_of(xy)
+        self.last_layout = {"cube_xy": xy.tolist(), "cube_yaw": yaw, "bin_xy": box[:2].tolist(),
+                            "cell": self.layout_cell}
         w.data.qpos[a : a + 3] = (*xy, CUBE_HALF)
         w.data.qpos[a + 3 : a + 7] = (np.cos(yaw / 2), 0, 0, np.sin(yaw / 2))
         w.set_target((0.45, 0.30, -0.2))  # hide the reach marker under the table
         self._in_box_steps = 0
         mujoco.mj_forward(w.model, w.data)
         self._phi, _ = self._potential()
+
+    def set_layout_weights(self, weights) -> None:
+        self.layout_weights = None if weights is None else np.asarray(weights, dtype=np.float64).ravel()
+
+    def _cell_of(self, xy: np.ndarray) -> int:
+        r = np.maximum(self.cube_xy_range, 1e-9)
+        g = self.layout_grid
+        idx = np.clip(((xy - self.world.cube_start[:2] + r) / (2 * r) * g).astype(int), 0, g - 1)
+        return int(idx[0] * g + idx[1])
+
+    def _draw_cube(self, cube0: np.ndarray) -> np.ndarray:
+        r, g = self.cube_xy_range, self.layout_grid
+        w = self.layout_weights
+        if w is None or w.sum() <= 0 or not np.any(r):
+            return cube0 + self.np_random.uniform(-r, r)
+        cell = int(self.np_random.choice(len(w), p=w / w.sum()))
+        lo = -r + 2 * r * np.array([cell // g, cell % g]) / g
+        return cube0 + lo + self.np_random.uniform(0, 2 * r / g)
+
+    def _sample_layout(self) -> tuple[np.ndarray, float, np.ndarray]:
+        w = self.world
+        cube0, box0 = w.cube_start[:2], self._box0
+        away = (box0[:2] - cube0) / np.linalg.norm(box0[:2] - cube0)
+        side = np.array([-away[1], away[0]])
+        for _ in range(100):
+            xy = self._draw_cube(cube0)
+            box = box0.copy()
+            if self.bin_away_range[1] > 0 or self.bin_side_range > 0:
+                box[:2] += (self.np_random.uniform(*self.bin_away_range) * away
+                            + self.np_random.uniform(-self.bin_side_range, self.bin_side_range) * side)
+            # Tony's rejection rules: separated (bin outer half-width 0.049 + cube 0.015 + 1 cm),
+            # and inside the 0.4 m workspace around (0.2, 0) in the robot's original frame.
+            if np.all(np.abs(xy - box[:2]) < 0.049 + 0.015 + 0.01):
+                continue
+            break
+        yaw = self.np_random.uniform(-self.cube_yaw_range, self.cube_yaw_range)
+        return xy, float(yaw), box
 
     def _task_state(self) -> np.ndarray:
         # Gripper state: commanded and measured opening, normalized (also inside qpos/targets).
@@ -675,6 +776,7 @@ class So101PickPlaceEnv(_So101TaskEnv):
             "cube_in_box": in_box,
             "reach_distance": d_reach,
             "grasp_depth_cm": self.grasp_depth_cm() if lifted else float("nan"),
+            "layout_cell": self.layout_cell,
         }
         return float(reward), success, info
 

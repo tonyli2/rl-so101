@@ -1,0 +1,31 @@
+{
+  "source": "Pilot v2 (2026-11-26): realistic delay, Tony's appearance protocol, measured-scale camera uncertainty",
+  "ranges": {
+    "factor_strength": {
+      "texture": 0.0,
+      "lighting": 0.0,
+      "camera": 1.0,
+      "friction": 0.75,
+      "actuator": 1.0,
+      "appearance": 1.0
+    },
+    "camera_pos_m": 0.005,
+    "camera_rot_deg": 1.0,
+    "camera_fovy_deg": 1.0,
+    "wrist_pos_m": 0.005,
+    "wrist_rot_deg": 2.0,
+    "wrist_fovy_deg": 1.0,
+    "latency_steps": 3,
+    "latency_min_steps": 1,
+    "obs_latency_steps": 0,
+    "image_latency_steps": 2,
+    "image_latency_min_steps": 0,
+    "zero_delay_prob": 0.1,
+    "image_shift_px": 4
+  },
+  "rationale": {
+    "delay": "Real arm: commands ~2.3-3.3 steps late (servo dead time + compute), joint reads ~0.4 ms (on time), camera frames 1-2 steps old. Train commands 1-3, joints 0, camera 0-2, plus 10% of episodes with no delay. The v1 ranges (each 0-2 independently) left the randomized policies at 0% without delay.",
+    "appearance": "Tony's visual protocol (gloss, surface tones, light direction/intensity/colour, camera exposure/white balance/noise/blur) replaces texture swaps and the weak lighting factor: the validation drop was on exactly these variants.",
+    "camera": "Pose/FOV jitter cut to about the measured-calibration uncertainty (v1 used +-1.1 cm / +-2.3 deg at full strength)."
+  }
+}

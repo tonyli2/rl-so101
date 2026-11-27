@@ -53,6 +53,12 @@ RELEASE_Z = 0.075
 GRIPPER_OPEN, GRIPPER_CLOSED = 70.0, 0.0   # LeRobot units (0-100)
 CLOSE_OVERLAP = 6                          # descent steps left when the jaws start closing
 PEAK_DEG_PER_STEP = 2.0                    # teleop 99th percentile is 0.9-2.1 deg/step on the arm
+# "segmented": stop at each waypoint (grasps more reliably: 13-17/20 vs 9-11/20 at teleop speed);
+# "continuous": never stop between waypoints (no stop-then-go labels for BC to average).
+MOTION = "segmented"
+# Segmented motion: fraction of the approach's slow tail skipped so the descent starts while the
+# arm still moves (0 = full stop at the hover point; BC at teleop speed stalled there).
+HOVER_BLEND = 0.0
 
 
 def smooth(n: int) -> np.ndarray:
@@ -69,6 +75,7 @@ class Expert:
         self.noise = np.deg2rad(noise_deg)
         self.offset = np.zeros(6)
         self.plan: list[np.ndarray] = []
+        self.quiet: list[bool] = []
         self.target = self.w.qpos.copy()
         self.phase = 0
         self.roll = None
@@ -91,11 +98,60 @@ class Expert:
         # cosine profile peaks at pi/2 x the mean speed
         n = max(min_steps, int(np.ceil(delta * np.pi / 2 / (PEAK_DEG_PER_STEP * speed))))
         self.plan = [start + (goal - start) * s for s in smooth(n)]
+        self.quiet = [False] * n
 
     def hold(self, steps: int) -> None:
         self.plan = [self.target.copy()] * steps
 
+    def path(self, waypoints: list, speeds: list, ease_in: bool = True, quiet: list | None = None) -> None:
+        """Continuous motion through joint-space waypoints (ease in at the start, ease out at the
+        end, constant speed in between). The arm never stops at an intermediate waypoint: a stop
+        followed by a restart gives one observation two labels ("stay", "go on"), and BC trained
+        on that stalls there (it hovered over the cube at teleop speed). ``quiet`` marks segments
+        executed with reduced noise (the descent)."""
+        pts = [self.target.copy()] + list(waypoints)
+        quiet = quiet or [False] * len(waypoints)
+        plan, flags, last = [], [], len(waypoints) - 1
+        for i, (a, b, sp) in enumerate(zip(pts[:-1], pts[1:], speeds)):
+            d = max(np.rad2deg(np.abs(b[ARM] - a[ARM])).max(), np.rad2deg(abs(b[GRIPPER] - a[GRIPPER])) / 6)
+            n = max(4, int(np.ceil(d / (PEAK_DEG_PER_STEP * sp))))
+            first_eased, last_eased = (i == 0 and ease_in), (i == last)
+            if first_eased and last_eased:
+                n = int(np.ceil(n * np.pi / 2))
+                f = smooth(n)
+            elif first_eased:   # velocity 0 -> full
+                n = int(np.ceil(n * np.pi / 2))
+                f = 1 - np.cos(np.pi / 2 * np.arange(1, n + 1) / n)
+            elif last_eased:    # full -> 0
+                n = int(np.ceil(n * np.pi / 2))
+                f = np.sin(np.pi / 2 * np.arange(1, n + 1) / n)
+            else:
+                f = np.arange(1, n + 1) / n
+            plan += [a + (b - a) * x for x in f]
+            flags += [quiet[i]] * n
+        self.plan, self.quiet = plan, flags
+
+    def overlay_gripper(self, goal_value: float, before_end: int, ramp: int) -> None:
+        """Move the gripper to goal_value starting ``before_end`` steps before the arm arrives,
+        over ``ramp`` steps, holding the arm at its final target if the ramp outlasts the motion."""
+        n = len(self.plan)
+        k = max(0, n - before_end)
+        g0, g1 = self.plan[k][GRIPPER], self.grip(goal_value)
+        extra = max(0, k + ramp - n)
+        self.plan += [self.plan[-1].copy() for _ in range(extra)]
+        self.quiet += [self.quiet[-1]] * extra
+        for j, x in enumerate(smooth(ramp)):
+            self.plan[k + j] = self.plan[k + j].copy()
+            self.plan[k + j][GRIPPER] = g0 + (g1 - g0) * x
+        for j in range(k + ramp, len(self.plan)):
+            self.plan[j] = self.plan[j].copy()
+            self.plan[j][GRIPPER] = g1
+
     def next_phase(self) -> bool:
+        """Plan the next motion from the current state. Returns False when the script is done."""
+        return self._next_phase_continuous() if MOTION == "continuous" else self._next_phase_segmented()
+
+    def _next_phase_segmented(self) -> bool:
         """Plan the next segment from the current state. Returns False when the script is done."""
         w, cube = self.w, self.w.cube_pos()
         box = w.data.xpos[w.box_body].copy()
@@ -111,19 +167,28 @@ class Expert:
             goal[4] = self.roll
             goal[GRIPPER] = self.grip(GRIPPER_OPEN)
             self.segment(goal, min_steps=30, speed=1.0)
+            if HOVER_BLEND:  # drop the slow tail: the descent takes over while the arm still moves
+                self.plan = self.plan[: max(1, int(len(self.plan) * (1 - HOVER_BLEND)))]
+                self.quiet = self.quiet[: len(self.plan)]
         elif self.phase == 2:    # descend, closing over the last steps (no open-jaw pause)
             # A pause at the bottom with the jaws open, then closing, gives the same observation two
             # labels ("stay", "close"); BC averaged them and stalled there. People start squeezing
             # while still arriving, so the jaws start closing CLOSE_OVERLAP steps before the bottom.
             goal = self.ik((cube[0], cube[1], GRASP_Z), q)
-            goal[4], goal[GRIPPER] = self.roll, q[GRIPPER]
+            goal[4], goal[GRIPPER] = self.roll, self.grip(GRIPPER_OPEN)
             self.segment(goal, min_steps=25, speed=0.6)
+            if HOVER_BLEND:  # start at speed (no stop-then-go at the hover), ease out at the cube
+                n = len(self.plan)
+                f = np.sin(np.pi / 2 * np.arange(1, n + 1) / n)
+                self.plan = [q + (goal - q) * x for x in f]
+            self.quiet = [True] * len(self.plan)
             arm = self.plan + [goal] * 20
             k = len(self.plan) - CLOSE_OVERLAP
             g0, g1 = q[GRIPPER], self.grip(GRIPPER_CLOSED)
             grip = [g0] * k + [g0 + (g1 - g0) * s for s in smooth(20)]
             grip += [g1] * (len(arm) - len(grip))
             self.plan = [np.concatenate([a[:GRIPPER], [g]]) for a, g in zip(arm, grip)][: k + 20 + 6]
+            self.quiet = [True] * len(self.plan)
         elif self.phase == 3:    # (closing happens at the end of the descent)
             self.plan = []
             return True
@@ -157,18 +222,59 @@ class Expert:
             return False
         return True
 
+    def _next_phase_continuous(self) -> bool:
+        """Plan the next motion from the current state. Returns False when the script is done."""
+        w, cube = self.w, self.w.cube_pos()
+        box = w.data.xpos[w.box_body].copy()
+        q = self.target.copy()
+        self.phase += 1
+        if self.phase == 1:      # over the cube (jaws opening) and down in one motion, closing at the end
+            # Solve the grasp pose first, then the hover pose from it: IK started from a start pose
+            # can settle on a tilted gripper over the cube, and tilted jaws sweep into the cube.
+            q_grasp = self.ik((cube[0], cube[1], GRASP_Z), q)
+            hover = self.ik((cube[0], cube[1], cube[2] + HOVER_DZ), q_grasp)
+            yaw = 2 * np.arctan2(w.data.qpos[w.cube_qadr + 6], w.data.qpos[w.cube_qadr + 3])
+            self.roll = jaw_roll(w, hover, cube_yaw=float(yaw))
+            # A higher waypoint first: the arm finishes its sideways travel up there and comes straight
+            # down, so servo lag at the corner cannot swing the jaws into the cube.
+            high = self.ik((cube[0], cube[1], cube[2] + HOVER_DZ + 0.05), hover)
+            high[4] = hover[4] = q_grasp[4] = self.roll
+            high[GRIPPER] = hover[GRIPPER] = q_grasp[GRIPPER] = self.grip(GRIPPER_OPEN)
+            self.path([high, hover, q_grasp], [1.0, 0.7, 0.6], quiet=[False, False, True])
+            # People start squeezing while still arriving: no open-jaw pause at the bottom.
+            self.overlay_gripper(GRIPPER_CLOSED, before_end=CLOSE_OVERLAP, ramp=20)
+        elif self.phase == 2:    # lift, carry over the bin and lower in one motion, opening at the end
+            lift = self.ik((cube[0], cube[1], CARRY_Z), q)
+            lift[4] = self.roll
+            over = self.ik((box[0], box[1], CARRY_Z), lift, point_down=False)
+            low = self.ik((box[0], box[1], RELEASE_Z), over, point_down=False)
+            for g in (lift, over, low):
+                g[GRIPPER] = q[GRIPPER]
+            self.path([lift, over, low], [0.7, 0.8, 0.6], ease_in=True)  # gentle start: let the grip settle
+            self.overlay_gripper(GRIPPER_OPEN, before_end=CLOSE_OVERLAP, ramp=12)
+        elif self.phase == 3:    # retreat upward and wait for the env's success check
+            goal = self.ik((box[0], box[1], CARRY_Z + 0.03), q, point_down=False)
+            goal[GRIPPER] = q[GRIPPER]
+            self.path([goal], [0.8], ease_in=False)
+            self.plan += [goal] * 40
+            self.quiet += [False] * 40
+        else:
+            return False
+        return True
+
     def step(self) -> tuple[np.ndarray, np.ndarray] | None:
         """(clean target = label, executed target) for this step, or None when finished."""
         while not self.plan:
             if not self.next_phase():
                 return None
         self.target = self.plan.pop(0)
+        quiet = self.quiet.pop(0) if self.quiet else False
         executed = self.target.copy()
         if self.noise:
             # Ornstein-Uhlenbeck-like drift: correlated over ~10 steps, std about noise_deg. Quieter
             # while descending and closing (a person slows down for the grasp too): full noise there
             # makes most grasps miss, and only successful episodes are kept.
-            sigma = self.noise * (0.3 if self.phase in (2, 3) else 1.0)
+            sigma = self.noise * (0.3 if quiet else 1.0)
             self.offset[:5] = 0.9 * self.offset[:5] + np.sqrt(1 - 0.81) * self.rng.normal(0, sigma, 5)
             executed[:5] += self.offset[:5]
         return self.target, np.clip(executed, self.w.lo, self.w.hi)
@@ -207,6 +313,7 @@ def run_episode(env, starts, rng, args, record: bool, frames: list | None = None
 
 
 def main() -> None:
+    global PEAK_DEG_PER_STEP, GRIPPER_CLOSED, MOTION, HOVER_BLEND
     import train_bc
     import train_ppo
 
@@ -218,11 +325,23 @@ def main() -> None:
     parser.add_argument("--start-jitter", type=float, default=3.0, help="+- deg on the start poses")
     parser.add_argument("--cube-xy", type=float, default=0.015, help="+- m around the measured cube spot")
     parser.add_argument("--cube-yaw", type=float, default=15.0, help="+- deg cube yaw")
-    parser.add_argument("--max-steps", type=int, default=700)
+    parser.add_argument("--max-steps", type=int, default=900)
+    parser.add_argument("--grip-closed", type=float, default=GRIPPER_CLOSED,
+                        help="closing command (LeRobot 0-100); the cube stops the jaws at ~16, so e.g. 8 "
+                             "squeezes a little past contact like a person instead of commanding fully shut")
+    parser.add_argument("--motion", choices=("segmented", "continuous"), default=MOTION)
+    parser.add_argument("--hover-blend", type=float, default=HOVER_BLEND,
+                        help="segmented: skip this fraction of the approach's tail and start the descent at speed")
+    parser.add_argument("--peak-deg", type=float, default=PEAK_DEG_PER_STEP,
+                        help="peak arm joint speed (deg per 33 ms step); teleop demos move ~1-2")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--video", action="store_true", help="save the first episode as an mp4")
     args = parser.parse_args()
 
+    PEAK_DEG_PER_STEP = args.peak_deg
+    GRIPPER_CLOSED = args.grip_closed
+    MOTION = args.motion
+    HOVER_BLEND = args.hover_blend
     prepare_mounted(rebuild=True)
     env = So101PickPlaceEnv(action_mode="absolute", image=True, image_size=(96, 128), history=1, wrist=True,
                             include_targets=False, include_velocities=True, episode_steps=args.max_steps,
@@ -275,7 +394,7 @@ def main() -> None:
             "frames": len(data["actions"]), "mean_length": float(np.mean(lengths)),
             "val_episodes": val, "train_episodes": list(range(kept - n_val)),
             "layout": {"cube_xy_m": args.cube_xy, "cube_yaw_deg": args.cube_yaw},
-            "noise_deg": args.noise_deg, "start_jitter_deg": args.start_jitter, "seed": args.seed,
+            "motion": args.motion, "hover_blend": args.hover_blend, "noise_deg": args.noise_deg, "peak_deg_per_step": args.peak_deg, "grip_closed": args.grip_closed, "start_jitter_deg": args.start_jitter, "seed": args.seed,
             "action_mode": "absolute", "image_size": [96, 128], "scene": "mounts/config.json (measured)",
             "seconds": round(time.time() - t0, 1)}
     (OUT / f"{args.name}.json").write_text(json.dumps(info, indent=2))
