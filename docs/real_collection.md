@@ -95,3 +95,35 @@ python train_act.py \
 
 Evaluate the 10k/20k/30k checkpoints on the real arm at placements inside and just outside the
 +-3 cm grid.
+
+## Run a trained ACT checkpoint on the real arm
+
+`lerobot-tabletop/real_run_act.py` opens a window that runs a LeRobot ACT checkpoint on the
+follower (the leader is not used). Use a separate venv with PyTorch 2.7, which still supports the
+Mac GPU (MPS) on macOS 13 (PyTorch 2.11 needs macOS 14 for MPS):
+
+```bash
+/opt/homebrew/opt/python@3.13/bin/python3.13 -m venv .venv-act
+.venv-act/bin/pip install "torch==2.7.1" "torchvision==0.22.1"
+.venv-act/bin/pip install "lerobot[feetech,dataset,hardware] @ git+https://github.com/huggingface/lerobot.git@9e5ee9859480e425a97a6836bb3fee479539beb5" "torch==2.7.1" "torchvision==0.22.1"
+.venv-act/bin/pip install --only-binary=:all: pyside6-essentials
+```
+
+Start it from Terminal or Finder (camera permission):
+
+```bash
+cd ~/Downloads/EECE576/rl-so101/lerobot-tabletop
+../../.venv-act/bin/python real_run_act.py --policy checkpoints/act-real-49demos-30k/020000/pretrained_model
+```
+
+- Inputs match the recordings: raw 640x480 RGB from both cameras, follower joints in the real
+  convention, no undistortion or sim offsets.
+- ACT takes ~85-150 ms per chunk on the M1 Pro GPU (~0.6 s on CPU), so the window predicts full
+  chunks continuously in a worker thread, anchors each at the tick its observation was taken,
+  and sends ACT's temporal ensemble (coefficient from the checkpoint, 0.01) at 30 Hz. Each
+  command is limited to `--max-step` degrees per tick (default 4, i.e. 120 deg/s).
+- Run policy / STOP (Space; Esc also stops, holding the arm where it is), Return to rest (3 s
+  ease to the recorder's rest pose), Success / Fail log each trial with the cube position seen at
+  Run to `<checkpoint run>/real_trials.jsonl`.
+- First runs: keep a hand near the follower's power, start with the cube at the home mark, and
+  compare checkpoints (10k/20k/30k) on the same placements, inside and just outside the +-3 cm grid.
