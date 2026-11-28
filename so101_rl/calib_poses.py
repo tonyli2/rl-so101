@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 
 from envs import HOME_DEG, So101World, prepare_mounted
-from run_real import Camera, make_robot, move_to, read_deg
+from run_real import connect_live, Camera, move_to, read_deg
 
 POSES = [  # name, degrees (pan, lift, elbow, wrist_flex, wrist_roll, gripper 0-100)
     ("home", HOME_DEG),
@@ -52,8 +52,7 @@ def main() -> None:
     world = So101World()
     args.out.mkdir(parents=True, exist_ok=True)
     cams = {"overhead": Camera(args.overhead, "overhead"), "wrist": Camera(args.wrist, "wrist")}
-    robot = make_robot(args.port, args.max_step)
-    robot.connect(calibrate=False)
+    robot = connect_live(args.port, args.max_step)
     if not robot.bus.is_calibrated:
         raise RuntimeError("motor calibration does not match follower.json")
     rest = read_deg(robot)

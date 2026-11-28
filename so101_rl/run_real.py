@@ -11,14 +11,17 @@ ranges; actions mapped by deploy.Policy.mapper (resync).
     # live: moves slowly to HOME, runs the policy, moves slowly back to the start pose
     python run_real.py outputs/deploy/pilot2_randomized_s1_1300k --overhead 0 --wrist 1 --seconds 30 --show
 
-Ctrl-C during a live run stops the policy and returns the arm to where it started before torque
-is released. Keep a hand on the power switch for the first runs.
+Press q (or h) in the terminal, q in the --show window, or Ctrl-C to stop early: the policy stops
+and the arm moves slowly back to where it started before torque is released. The return move
+itself is not interruptible. Keep a hand on the power switch for the first runs.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import select
+import sys
 import threading
 import time
 from pathlib import Path
@@ -121,6 +124,26 @@ def make_robot(port: str, max_step: float):
     return SOFollower(cfg)
 
 
+def connect_live(port: str, max_step: float, attempts: int = 3):
+    """Connect with torque on, retrying: LeRobot's configure() enables torque with a single try per
+    motor, and an occasional serial timeout (seen on the elbow and the gripper) aborts the run.
+    The arm is at rest during connect, so a retry is safe; a failed attempt leaves torque off."""
+    for attempt in range(1, attempts + 1):
+        robot = make_robot(port, max_step)
+        try:
+            robot.connect(calibrate=False)
+            return robot
+        except ConnectionError as e:
+            print(f"connect attempt {attempt}/{attempts} failed: {e}", flush=True)
+            try:
+                robot.bus.disconnect(disable_torque=True)
+            except Exception:
+                pass
+            if attempt == attempts:
+                raise
+            time.sleep(1.0)
+
+
 def read_deg(robot) -> np.ndarray:
     pos = robot.bus.sync_read("Present_Position", num_retry=robot.config.num_read_retries)
     return np.array([pos[j] for j in JOINTS], dtype=np.float64)
@@ -130,15 +153,51 @@ def send_deg(robot, deg) -> None:
     robot.send_action({f"{j}.pos": float(v) for j, v in zip(JOINTS, deg)})
 
 
-def move_to(robot, goal_deg, seconds: float) -> None:
-    """Straight-line joint move at 30 Hz; max_relative_target still caps every step."""
+def move_to(robot, goal_deg, seconds: float, stop: threading.Event | None = None) -> None:
+    """Straight-line joint move at 30 Hz; max_relative_target still caps every step. With
+    ``stop``, the move ends early (the arm holds where it is) once the event is set."""
     start = read_deg(robot)
     n = max(1, int(seconds * FPS))
     for i in range(1, n + 1):
+        if stop is not None and stop.is_set():
+            return
         t0 = time.perf_counter()
         send_deg(robot, start + (np.asarray(goal_deg) - start) * i / n)
         time.sleep(max(0.0, 1 / FPS - (time.perf_counter() - t0)))
     time.sleep(0.5)
+
+
+class StopKey:
+    """Sets ``event`` when q or h is pressed in the terminal (no Enter needed). The terminal is put
+    in cbreak mode, which keeps Ctrl-C working, and restored on close. A no-op without a terminal."""
+
+    KEYS = ("q", "Q", "h", "H")
+
+    def __init__(self):
+        self.event = threading.Event()
+        self._saved = None
+        self._done = threading.Event()
+        if not sys.stdin.isatty():
+            return
+        import termios
+        import tty
+
+        self._termios = termios
+        self._saved = termios.tcgetattr(sys.stdin)
+        tty.setcbreak(sys.stdin.fileno())
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        while not self._done.is_set():
+            ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+            if ready and sys.stdin.read(1) in self.KEYS:
+                self.event.set()
+
+    def close(self):
+        self._done.set()
+        if self._saved is not None:
+            self._termios.tcsetattr(sys.stdin, self._termios.TCSADRAIN, self._saved)
+            self._saved = None
 
 
 def main() -> None:
@@ -181,11 +240,11 @@ def main() -> None:
         cv2.imwrite(str(run_dir / f"{cam.name}_policy.png"), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
     print(f"camera snapshots in {run_dir}", flush=True)
 
-    robot = make_robot(args.port, args.max_step)
     if args.dry_run:
+        robot = make_robot(args.port, args.max_step)
         robot.bus.connect()  # no configure(): torque stays as it is (off)
     else:
-        robot.connect(calibrate=False)
+        robot = connect_live(args.port, args.max_step)
     if not robot.bus.is_calibrated:
         raise RuntimeError("motor calibration does not match lerobot-tabletop/calibration/follower.json")
     GRIPPER_LEROBOT = {"Max_Torque_Limit": 500, "Torque_Limit": 500, "Protection_Current": 250, "Overload_Torque": 25}
@@ -241,17 +300,23 @@ def main() -> None:
     rest_deg = read_deg(robot)
     print("start pose (deg):", np.round(rest_deg, 1), flush=True)
     log = {k: [] for k in ("t", "deg", "action", "target_deg", "dt", "front", "wrist")}
+    keys = StopKey()
     try:
         if not args.dry_run:
-            print(f"moving to HOME {HOME_DEG} (sim convention) over {args.move_seconds} s", flush=True)
-            move_to(robot, to_real(HOME_DEG), args.move_seconds)
+            print(f"moving to HOME {HOME_DEG} (sim convention) over {args.move_seconds} s; "
+                  "press q to stop and return", flush=True)
+            move_to(robot, to_real(HOME_DEG), args.move_seconds, stop=keys.event)
+            if keys.event.is_set():
+                raise KeyboardInterrupt
         deg, q, obs = observe()
         mapper.reset(q)
-        print(f"running policy for {args.seconds} s{' (dry run)' if args.dry_run else ''}; Ctrl-C to stop",
-              flush=True)
+        print(f"running policy for {args.seconds} s{' (dry run)' if args.dry_run else ''}; "
+              "press q (or Ctrl-C) to stop and return", flush=True)
         t_start = time.perf_counter()
         step = 0
         while time.perf_counter() - t_start < args.seconds:
+            if keys.event.is_set():
+                raise KeyboardInterrupt
             t0 = time.perf_counter()
             if step:
                 deg, q, obs = observe()
@@ -279,6 +344,7 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nstopped by user", flush=True)
     finally:
+        keys.close()
         try:
             if not args.dry_run:
                 print("returning to start pose", flush=True)

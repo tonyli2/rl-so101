@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 
 from envs import HOME_DEG, So101World, prepare_mounted
-from run_real import FPS, SIM_MINUS_REAL_DEG, Camera, make_robot, move_to, read_deg, send_deg
+from run_real import connect_live, FPS, SIM_MINUS_REAL_DEG, Camera, move_to, read_deg, send_deg
 
 POSES_A = [
     (0, -30, 30, 60, -85, 30), (15, -20, 30, 60, -85, 30), (30, -20, 30, 60, -85, 30),
@@ -70,8 +70,7 @@ def main() -> None:
             raise SystemExit(f"pose {p} clearance {c:.3f} m < {MIN_CLEARANCE}; refusing")
     args.out.mkdir(parents=True, exist_ok=True)
     cams = {"overhead": Camera(args.overhead, "overhead"), "wrist": Camera(args.wrist, "wrist")}
-    robot = make_robot(args.port, 10.0)
-    robot.connect(calibrate=False)
+    robot = connect_live(args.port, 10.0)
     if not robot.bus.is_calibrated:
         raise RuntimeError("motor calibration does not match follower.json")
 
