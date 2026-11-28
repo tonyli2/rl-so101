@@ -401,6 +401,12 @@ class _So101TaskEnv(gym.Env):
         self._past_actions: deque = deque(maxlen=max(1, action_history))
         # Per-frame image effects (randomization "appearance"): fx(image, camera_index, step).
         self.image_fx = None
+        # Calibration error (randomization "calibration", radians): added to every joint reading the
+        # policy and the action mapping see, and subtracted from the commands, like a mis-zeroed servo.
+        self.joint_bias = np.zeros(6)
+        # Servo deadband (randomization "actuator" deadband_deg, radians): each joint is driven toward a
+        # target this much short of the command, so it settles short like the real servos.
+        self.servo_deadband = np.zeros(6)
 
         self.action_space = spaces.Box(-1.0, 1.0, (6,), np.float32)
         n = len(self._state_vector()) + 6 * action_history
@@ -422,7 +428,7 @@ class _So101TaskEnv(gym.Env):
     def _state_vector(self) -> np.ndarray:
         w = self.world
         span = w.hi - w.lo
-        qpos_n = 2 * (w.qpos - w.lo) / span - 1
+        qpos_n = 2 * (w.qpos + self.joint_bias - w.lo) / span - 1
         parts = [qpos_n]
         if getattr(self, "include_velocities", True):
             parts.append(w.qvel * self.QVEL_SCALE)
@@ -445,7 +451,7 @@ class _So101TaskEnv(gym.Env):
             wrist = wrist if wrist is None else self.image_fx(wrist, 1, self._steps)
         if fresh:
             self._sensed.clear()
-        self._sensed.append((state, frame, wrist, self.world.qpos.copy()))
+        self._sensed.append((state, frame, wrist, self.world.qpos + self.joint_bias))
         if self.obs_latency or self.image_latency:  # report older readings / frames
             past = lambda k: self._sensed[max(0, len(self._sensed) - 1 - k)]  # noqa: E731
             state, q = past(self.obs_latency)[0], past(self.obs_latency)[3]
@@ -513,14 +519,18 @@ class _So101TaskEnv(gym.Env):
             self._target_ctrl = np.clip(self._target_ctrl + a * self.delta_scale, w.lo, w.hi)
         elif self.action_mode == "relative":
             # The mapping sees the joint reading the policy saw (late when obs_latency > 0).
-            self._target_ctrl = self.mapper(a, self.reported_q if self.obs_latency else w.qpos)
+            self._target_ctrl = self.mapper(a, self.reported_q if self.obs_latency else w.qpos + self.joint_bias)
         else:
             self._target_ctrl = w.lo + (a + 1) / 2 * (w.hi - w.lo)
-        applied = self._target_ctrl
+        # The policy's targets are in its (biased) joint frame; the servo receives them unbiased.
+        applied = np.clip(self._target_ctrl - self.joint_bias, w.lo, w.hi) if self.joint_bias.any() else self._target_ctrl
         if self.action_latency:
-            self._pending.append(self._target_ctrl.copy())
+            self._pending.append(applied.copy())
             applied = self._pending.popleft() if len(self._pending) > self.action_latency else self._held
         self._held = applied
+        if self.servo_deadband.any():
+            e = applied - w.qpos
+            applied = w.qpos + np.sign(e) * np.maximum(np.abs(e) - self.servo_deadband, 0.0)
         w.step(applied)
 
     def step(self, action):
@@ -675,6 +685,8 @@ class So101PickPlaceEnv(_So101TaskEnv):
         return float(phi), {"d_reach": d_reach, "lifted": lifted, "in_box": in_box}
 
     def _apply_randomization(self) -> None:
+        self.joint_bias = np.zeros(6)
+        self.servo_deadband = np.zeros(6)
         if self.randomize is None and self.fixed_factors is None:
             return
         if self._randomizer is None:
@@ -693,6 +705,13 @@ class So101PickPlaceEnv(_So101TaskEnv):
         self.action_latency = int(act.get("latency_steps", 0))
         self.obs_latency = int(act.get("obs_latency_steps", 0))
         self.image_latency = int(act.get("image_latency_steps", 0))
+        self.servo_deadband = np.deg2rad(np.asarray(act.get("deadband_deg", np.zeros(6)), dtype=np.float64))
+        cal = self.last_factors.get("calibration")
+        if cal:
+            self.joint_bias = np.deg2rad(np.asarray(cal.get("joint_bias_deg", np.zeros(6)), dtype=np.float64))
+            if self.mapper is not None:  # the mapping starts from the reading the policy will see
+                self.mapper.reset(self.world.qpos + self.joint_bias)
+            self._target_ctrl = self.world.qpos + self.joint_bias
 
     def _reset_task(self) -> None:
         self._apply_randomization()

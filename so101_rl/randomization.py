@@ -97,6 +97,27 @@ class Ranges:
     # effects (exposure, white balance, noise, blur), each axis on with probability = strength;
     # plus a per-episode image shift of up to +-image_shift_px pixels per camera.
     image_shift_px: int = 4
+    # Appearance camera effects: exposure range, optional contrast range, and whether each camera
+    # draws its own exposure/contrast (the real wrist image is darker than the overhead's).
+    # Defaults reproduce Tony's protocol exactly.
+    appearance_exposure: tuple = (0.82, 1.18)
+    appearance_contrast: tuple | None = None
+    appearance_per_camera: bool = False
+    # "actuator" servo dynamics (None = nominal gains, the old behavior): per-joint stiffness and
+    # damping scales (pan, lift, elbow, flex, roll, gripper) fitted to the real arm's step
+    # responses, each drawn log-uniformly within x/(1 + servo_gain_spread) .. x*(1 + spread).
+    servo_kp_scale: list | None = None
+    servo_kv_scale: list | None = None
+    servo_gain_spread: float = 0.0
+    # Servo deadband (deg per joint; None = off): each episode draws U(0, 1.5) x this per joint, and
+    # the env stops the joint that far short of its target, like the real low-gain servos that
+    # settle 0.3-2.8 deg short against friction (measured over 19 holding poses).
+    servo_deadband_deg: list | None = None
+    # "calibration": per-episode error in the joint readings the policy sees (deg, uniform +-
+    # per joint), the commands carrying the same error (as with a mis-zeroed servo); plus a
+    # lift/elbow error along (+1, -1), the direction the real calibration leaves least determined.
+    joint_bias_deg: list | None = None
+    joint_bias_lift_elbow_deg: float = 0.0
     # Per-factor cap on strength (0-1), from the calibration pilot (calibrate_ranges.py): each
     # factor's ranges are scaled by curriculum strength x its cap.
     factor_strength: dict = field(default_factory=lambda: {"texture": 1.0, "lighting": 1.0,
@@ -152,7 +173,7 @@ class Randomizer:
         probability 1 - strength."""
         base = float(np.clip(strength, 0.0, 1.0))
         cap = {"texture": 1.0, "lighting": 1.0, "camera": 1.0, "friction": 1.0, "actuator": 1.0,
-               "appearance": 1.0, **ranges.factor_strength}
+               "appearance": 1.0, "calibration": 1.0, **ranges.factor_strength}
         p: dict = {}
         n_lights = len(self.light_dir0)
         s = base * cap["texture"]
@@ -194,9 +215,28 @@ class Randomizer:
                 p["actuator"]["image_latency_steps"] = draw(ranges.image_latency_min_steps, ranges.image_latency_steps)
             if rng.random() < ranges.zero_delay_prob:
                 p["actuator"] = {k: 0 for k in p["actuator"]}
+            if ranges.servo_kp_scale is not None:  # drawn after the delay so old configs keep their stream
+                spread = np.log1p(s * ranges.servo_gain_spread)
+                kv0 = ranges.servo_kv_scale if ranges.servo_kv_scale is not None else ranges.servo_kp_scale
+                p["actuator"]["kp_scale"] = (np.asarray(ranges.servo_kp_scale, float)
+                                             * np.exp(rng.uniform(-spread, spread, 6))).tolist()
+                p["actuator"]["kv_scale"] = (np.asarray(kv0, float) * np.exp(rng.uniform(-spread, spread, 6))).tolist()
+            if ranges.servo_deadband_deg is not None:
+                p["actuator"]["deadband_deg"] = (s * rng.uniform(0, 1.5, 6)
+                                                 * np.asarray(ranges.servo_deadband_deg, float)).tolist()
         s = base * cap["appearance"]
         if "appearance" in factors:
-            p["appearance"] = sample_appearance(rng, s, ranges.image_shift_px)
+            p["appearance"] = sample_appearance(rng, s, ranges.image_shift_px, exposure=ranges.appearance_exposure,
+                                                contrast=ranges.appearance_contrast,
+                                                per_camera=ranges.appearance_per_camera)
+        s = base * cap["calibration"]
+        if "calibration" in factors:
+            bias = np.zeros(6)
+            if ranges.joint_bias_deg is not None:
+                bias += s * rng.uniform(-1, 1, 6) * np.asarray(ranges.joint_bias_deg, float)
+            if ranges.joint_bias_lift_elbow_deg:
+                bias[1:3] += s * rng.uniform(-1, 1) * ranges.joint_bias_lift_elbow_deg * np.array([1.0, -1.0])
+            p["calibration"] = {"joint_bias_deg": bias.tolist()}
         return p
 
     # --- applying -----------------------------------------------------------------------------
@@ -264,7 +304,8 @@ class Randomizer:
             self.world.set_object_friction(p["friction"])
         if "actuator" in p:  # servo dynamics (latency is applied by the env, see actuator_latency)
             a = p["actuator"]
-            kp, kv = a.get("kp_scale", 1.0), a.get("kv_scale", a.get("kp_scale", 1.0))
+            kp = np.asarray(a.get("kp_scale", 1.0), float)
+            kv = np.asarray(a.get("kv_scale", a.get("kp_scale", 1.0)), float)
             m.actuator_gainprm[self.act, 0] = self.gain0[:, 0] * kp
             m.actuator_biasprm[self.act, 1] = self.bias0[:, 1] * kp
             m.actuator_biasprm[self.act, 2] = self.bias0[:, 2] * kv
@@ -282,7 +323,11 @@ APPEARANCE_AXES = ("material_gloss", "surface_tone", "light_direction", "light_i
                    "camera_effects")
 
 
-def sample_appearance(rng: np.random.Generator, strength: float, shift_px: int) -> dict:
+def sample_appearance(rng: np.random.Generator, strength: float, shift_px: int,
+                      exposure: tuple = (0.82, 1.18), contrast: tuple | None = None,
+                      per_camera: bool = False) -> dict:
+    """Tony's appearance protocol. ``exposure``/``contrast`` ranges and ``per_camera`` (each camera
+    draws its own) extend it; with the defaults the draws are identical to the original."""
     p = {
         "material_gloss": {"plastic_specular": rng.uniform(0.05, 0.65), "plastic_shininess": rng.uniform(0.08, 0.75),
                            "arm_specular": rng.uniform(0.18, 0.75), "paper_specular": rng.uniform(0, 0.07),
@@ -294,7 +339,7 @@ def sample_appearance(rng: np.random.Generator, strength: float, shift_px: int) 
         "light_direction": {"tilt_x": rng.uniform(-0.65, 0.65), "tilt_y": rng.uniform(-0.65, 0.65)},
         "light_intensity": {"scale": rng.uniform(0.6, 1.4), "ambient_scale": rng.uniform(0.7, 1.25)},
         "light_color": {"rgb_gain": rng.uniform([0.82, 0.91, 0.82], [1.1, 1.03, 1.1]).tolist()},
-        "camera_effects": {"exposure": rng.uniform(0.82, 1.18), "channel_gain": rng.uniform(0.95, 1.05, 3).tolist(),
+        "camera_effects": {"exposure": rng.uniform(*exposure), "channel_gain": rng.uniform(0.95, 1.05, 3).tolist(),
                            "noise_sigma_255": rng.uniform(1.5, 5), "blur_radius_px": rng.uniform(0.15, 0.65)},
     }
     p = {k: ({kk: (float(vv) if np.isscalar(vv) else vv) for kk, vv in v.items()}) for k, v in p.items()}
@@ -302,6 +347,12 @@ def sample_appearance(rng: np.random.Generator, strength: float, shift_px: int) 
     top = round(strength * shift_px)
     p["shift_px"] = rng.integers(-top, top + 1, (2, 2)).tolist()  # per camera: (dx, dy)
     p["noise_seed"] = int(rng.integers(2**31))
+    c = p["camera_effects"]
+    if per_camera:  # [overhead, wrist]; drawn last so the default stream is unchanged
+        c["exposure"] = [c["exposure"], float(rng.uniform(*exposure))]
+    if contrast is not None:
+        c["contrast"] = rng.uniform(*contrast, 2 if per_camera else None).tolist() if per_camera \
+            else float(rng.uniform(*contrast))
     return p
 
 
@@ -363,7 +414,10 @@ def image_effects(p: dict, width: int):
 
     def fx(image: np.ndarray, cam: int, step: int) -> np.ndarray:
         if on:
-            im = ImageEnhance.Brightness(Image.fromarray(image)).enhance(c["exposure"])
+            pick = lambda v: v[cam] if isinstance(v, (list, tuple)) else v  # noqa: E731  per-camera values
+            im = ImageEnhance.Brightness(Image.fromarray(image)).enhance(pick(c["exposure"]))
+            if "contrast" in c:
+                im = ImageEnhance.Contrast(im).enhance(pick(c["contrast"]))
             im = im.filter(ImageFilter.GaussianBlur(c["blur_radius_px"] * k))
             px = np.asarray(im, dtype=np.float32) * np.asarray(c["channel_gain"], dtype=np.float32)
             rng = np.random.default_rng([p["noise_seed"], cam, step])

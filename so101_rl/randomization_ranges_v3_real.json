@@ -1,0 +1,77 @@
+{
+  "source": "v2 (randomization_ranges_v2.json) widened to the real SO-101 measurements of 2026-11-26/27 (so101_rl/sim2real_capture.py sessions 20261126-211901 and -221411, calib_poses, height_check).",
+  "ranges": {
+    "factor_strength": {
+      "texture": 0.0,
+      "lighting": 0.0,
+      "camera": 1.0,
+      "friction": 0.75,
+      "actuator": 1.0,
+      "appearance": 1.0,
+      "calibration": 1.0
+    },
+    "camera_pos_m": 0.01,
+    "camera_rot_deg": 2.0,
+    "camera_fovy_deg": 1.0,
+    "wrist_pos_m": 0.01,
+    "wrist_rot_deg": 3.0,
+    "wrist_fovy_deg": 1.0,
+    "latency_steps": 3,
+    "latency_min_steps": 1,
+    "obs_latency_steps": 0,
+    "image_latency_steps": 2,
+    "image_latency_min_steps": 0,
+    "zero_delay_prob": 0.1,
+    "image_shift_px": 4,
+    "appearance_exposure": [
+      0.6,
+      1.2
+    ],
+    "appearance_contrast": [
+      0.5,
+      1.05
+    ],
+    "appearance_per_camera": true,
+    "servo_kp_scale": [
+      0.25,
+      0.5,
+      0.35,
+      0.35,
+      0.35,
+      0.25
+    ],
+    "servo_kv_scale": [
+      5.0,
+      8.0,
+      6.0,
+      8.0,
+      8.0,
+      8.0
+    ],
+    "servo_gain_spread": 0.5,
+    "servo_deadband_deg": [
+      0.31,
+      1.45,
+      2.77,
+      0.92,
+      0.48,
+      0.51
+    ],
+    "joint_bias_deg": [
+      2.0,
+      2.0,
+      2.0,
+      2.0,
+      3.0,
+      0.0
+    ],
+    "joint_bias_lift_elbow_deg": 3.0
+  },
+  "rationale": {
+    "camera": "overhead refit residual ~1 cm / ~1-2 deg; wrist mount fit ~8 mm / ~1 deg off CAD (v2: 5 mm / 1-2 deg)",
+    "appearance": "real overhead ~0.81x and wrist ~0.67x the sim brightness, wrist contrast ~0.5x; per-camera draws",
+    "servo_gains": "per-joint kp/kv scales fitted to real 8-deg step responses (pan/lift/flex rms 0.15-0.20 deg vs 1.2 deg at default gains; real 90% rise 6-10 steps vs 3 in sim, no overshoot); x/1.5 spread",
+    "servo_deadband": "median |measured - commanded| over 19 real holding poses (pan .3 .. elbow 2.8 deg), constant across poses with different gravity load, i.e. friction against the low-gain servo, not sag; drawn U(0, 1.5) x this",
+    "calibration": "joint offsets are known to ~2-3 deg (roll ~3); lift and elbow trade off along (+1, -1) with ~1 cm fingertip height at full reach, which the image and height checks could not separate"
+  }
+}

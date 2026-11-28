@@ -233,7 +233,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--quick-eval", action="store_true", help="evaluate on the 5 validation starts only (smoke tests)")
     parser.add_argument("--randomize", nargs="*", metavar="FACTOR",
-                        choices=("texture", "lighting", "camera", "friction", "actuator", "appearance"),
+                        choices=("texture", "lighting", "camera", "friction", "actuator", "appearance", "calibration"),
                         help="randomized condition: resample these factors every training episode "
                              "(no names = all four). Evaluation stays nominal; sweeps are separate.")
     parser.add_argument("--randomize-ranges", type=Path, default=HERE / "randomization_ranges.json",
